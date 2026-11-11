@@ -1,0 +1,18 @@
+; ---- STM32F407VE single-image (boot @S0, app @S4) ----
+LR_IROM_BOOT 0x08000000 0x00004000  {   ; 16 KB (Sector 0)
+  ER_BOOT 0x08000000 0x00004000  {    ; place only the tiny boot code & boot vector
+    *(RESET, +First)               ; startup that contains Reset_Handler (boot)
+    *(.isr_vector_boot)            ; boot vector table (tiny)
+    *(.boot*)                      ; any boot-only sections
+  }
+}
+
+LR_IROM_APP  0x08010000 0x00070000  {   ; from Sector 4 to end (448 KB)
+  ER_APP 0x08010000  {               ; place the whole application here
+    *(.isr_vector_app)               ; app vector table at APP_BASE
+    *(+RO)                           ; .text .rodata ...
+  }
+  RW_APP 0x20000000 0x00020000  {     ; SRAM (adjust to your RAM size)
+    *(+RW +ZI)                       ; .data .bss .heap .stack
+  }
+}

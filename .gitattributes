@@ -1,0 +1,24 @@
+# 仓库内统一存 LF，检出时按平台转换（Windows 下为 CRLF）
+* text=auto
+
+# 源码
+*.c   text diff=cpp
+*.h   text diff=cpp
+*.s   text
+*.S   text
+*.sct text
+
+# Windows 专用 / Keil 工程文件：始终 CRLF
+*.bat      text eol=crlf
+*.uvprojx  text eol=crlf
+*.uvoptx   text eol=crlf
+*.dbgconf  text eol=crlf
+
+# 二进制
+*.pdf  binary
+*.a    binary
+*.lib  binary
+*.FLM  binary
+*.png  binary
+*.jpg  binary
+*.gif  binary

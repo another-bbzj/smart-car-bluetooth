@@ -1,0 +1,62 @@
+# dot files
+/.vscode
+
+# Keil µVision 用户 GUI 布局（含本机用户名，不入库）
+MDK-ARM/*.uvguix.*
+
+# project out
+MDK-ARM/build
+MDK-ARM/bin
+MDK-ARM/obj
+MDK-ARM/out
+
+# Keil 编译输出目录（uvprojx 里的 OutputDirectory）及常见默认输出目录
+MDK-ARM/NEUQ_STM32F407VET6_Opensource_Library/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+
+# 编译中间产物 / 固件（防止散落在其他目录时被误提交）
+*.o
+*.d
+*.crf
+*.dep
+*.lst
+*.map
+*.axf
+*.elf
+*.hex
+*.bin
+*.lnp
+*.htm
+*.build_log.htm
+
+# Keil 调试器日志
+JLinkLog.txt
+JLinkSettings.ini
+
+# 自动生成的 RTE 头文件（Keil 在 RTE/_<target>/，EIDE 在 MDK-ARM/ 根目录）
+MDK-ARM/RTE/_*/
+MDK-ARM/RTE_Components.h
+
+# EIDE 复制的芯片支持包（约 90MB，克隆后在 EIDE 里重新安装即可，Keil 不依赖它）
+MDK-ARM/.pack/
+
+# CMSIS 工具生成的缓存（与 Library/HAL_lib/Core/Inc 内头文件重复）
+MDK-ARM/.cmsis/
+
+# Python 缓存
+__pycache__/
+
+# Local firmware verification output and extracted reference diagrams
+/build/
+
+# eide template
+*.ept
+*.eide-template
+
+# 备份文件
+*.bak
+*.orig
+
+# EIDE 工程文件：EIDE 会自动改写它，只放在本地（克隆后在 EIDE 里从 Keil 工程导入）
+MDK-ARM/.eide/eide.yml
