@@ -141,7 +141,8 @@ float Car_Pid_update(Car_Pid_Struct *p, float target, float measure);
  *     u[k]  = u[k-1] + Δu[k]
  *
  *   其中 P、D、FF 的绝对项定义与位置式完全相同，增量由相邻两周期作差得到；
- *   ΔI 是积分项的本次变化量。last_output 保存上一周期的限幅输出。
+ *   ΔI 是最终接纳的积分变化量。递推使用未限幅的累加值 unclamped_output，
+ *   last_output 仅保存实际限幅输出，不能作为下一周期的递推基准。
  */
 typedef struct
 {
@@ -154,7 +155,8 @@ typedef struct
     /* ---------- 动态状态（由 update 维护） ---------- */
     float integral;         /* 已累积的积分输出，单位 PWM，受 integral_limit 限制 */
     float last_measure;     /* 上一周期实测转速，单位 rpm，用于计算测量变化率 */
-    float last_output;      /* 上一周期限幅后的输出 u[k-1]，单位 PWM */
+    float last_output;      /* 上一周期限幅后的执行器输出，单位 PWM */
+    float unclamped_output; /* 上一周期未限幅的累加值 u[k-1]，单位 PWM */
     float last_p_term;      /* 上一周期比例项值，单位 PWM，用于求 ΔP */
     float last_d_term;      /* 上一周期微分项值，单位 PWM，用于求 ΔD */
     float last_ff_term;     /* 上一周期前馈项值，单位 PWM，用于求 ΔFF */
@@ -210,7 +212,7 @@ uint8_t Car_PidInc_configure(Car_PidInc_Struct *p, float beta, float derivative_
 /**
  * @brief 保留配置，清空积分、微分历史、上一拍输出和状态标志。
  * @param p 增量式 PID 对象。
- * @note last_output 清零后，下一次输出从 0 开始累加。
+ * @note 限幅输出和未限幅累加值同时清零，下一次输出从 0 开始累加。
  */
 void Car_PidInc_reset(Car_PidInc_Struct *p);
 

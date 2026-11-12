@@ -3,6 +3,140 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
+
+static unsigned incremental_failures;
+
+/* Keep running after a failed check so both saturation regressions are visible. */
+static void check_incremental(float actual, float expected, const char *scenario)
+{
+    if (!isfinite(actual) || fabsf(actual - expected) > 0.02f)
+    {
+        fprintf(stderr, "%s: expected %.6g, got %.6g\n", scenario, expected, actual);
+        incremental_failures++;
+    }
+}
+
+static void test_incremental_saturation_recovery(void)
+{
+    Car_PidInc_Struct p;
+    int sign;
+    unsigned i;
+    for (sign = -1; sign <= 1; sign += 2)
+    {
+        assert(Car_PidInc_init(&p, 100, 1, 0, 1000));
+        for (i = 0; i < 4; i++)
+            check_incremental(Car_PidInc_update(&p, sign * 100.0f, 0),
+                              sign * 1000.0f, "hold saturated output");
+        check_incremental(p.integral, 0, "saturation must reject integration");
+        for (i = 0; i < 4; i++)
+            check_incremental(Car_PidInc_update(&p, 0, 0), 0,
+                              "zero demand after saturation");
+        assert(!p.fault);
+    }
+}
+
+static void test_incremental_rejected_integration(void)
+{
+    Car_PidInc_Struct p;
+    int sign;
+    for (sign = -1; sign <= 1; sign += 2)
+    {
+        assert(Car_PidInc_init(&p, 1, 2, 0, 100));
+        check_incremental(Car_PidInc_update(&p, sign * 40.0f, 0),
+                          sign * 40.0f, "rejected integral must not reach output");
+        check_incremental(p.integral, 0, "rejected integral state");
+        check_incremental(Car_PidInc_update(&p, 0, 0), 0,
+                          "rejected integral must not leave residual output");
+    }
+}
+
+static void test_incremental_integral_limit(void)
+{
+    Car_PidInc_Struct p;
+    unsigned i;
+    assert(Car_PidInc_init(&p, 0, 1, 0, 100));
+    assert(Car_PidInc_configure(&p, 1, 0.02f, 0.5f, 0, 0, 0));
+    check_incremental(Car_PidInc_update(&p, 30, 0), 30, "pure I first step");
+    for (i = 0; i < 5; i++)
+        check_incremental(Car_PidInc_update(&p, 30, 0), 50, "pure I cap");
+    check_incremental(Car_PidInc_update(&p, 0, 0), 50, "pure I hold");
+    check_incremental(Car_PidInc_update(&p, -20, 0), 30, "pure I unwind");
+    check_incremental(Car_PidInc_update(&p, -30, 0), 0, "pure I return to zero");
+}
+
+static void test_incremental_reset_and_faults(void)
+{
+    Car_PidInc_Struct p, saved;
+    assert(Car_PidInc_init(&p, 100, 1, 0, 1000));
+    (void)Car_PidInc_update(&p, 100, 0);
+    Car_PidInc_reset(&p);
+    check_incremental(Car_PidInc_update(&p, 1, 0), 101, "reset clears all history");
+    saved = p;
+    assert(!Car_PidInc_configure(&p, 1, 0.02f, 1, NAN, 0, 0));
+    assert(memcmp(&p, &saved, sizeof(p)) == 0);
+    assert(Car_PidInc_configure(&p, 0.5f, 0, 1, 0, 0, 0));
+    check_incremental(Car_PidInc_update(&p, 1, 0), 51, "configure clears history");
+    assert(Car_PidInc_update(&p, NAN, 0) == 0 && p.fault);
+    assert(Car_PidInc_update(&p, 1, 0) == 0 && p.fault);
+    Car_PidInc_reset(&p);
+    check_incremental(Car_PidInc_update(&p, 1, 0), 51, "reset recovers fault");
+    assert(Car_PidInc_update_dt(&p, 1, 0, 0, 0) == 0 && p.fault);
+    Car_PidInc_reset(&p);
+    assert(Car_PidInc_update(&p, 0, INFINITY) == 0 && p.fault);
+    assert(!Car_PidInc_init(&p, -1, 0, 0, 1000) && p.fault);
+}
+
+static void test_incremental_terms_and_timing(void)
+{
+    Car_PidInc_Struct p, q;
+    float x = 0, y = 0;
+    unsigned i;
+    assert(Car_PidInc_init(&p, 0, 0.01f, 0, 1000));
+    assert(Car_PidInc_init(&q, 0, 0.01f, 0, 1000));
+    for (i = 0; i < 200; i++) x = Car_PidInc_update_dt(&p, 100, 0, 0, 0.005f);
+    for (i = 0; i < 100; i++) y = Car_PidInc_update_dt(&q, 100, 0, 0, 0.010f);
+    check_incremental(x, 200, "5 ms integration");
+    check_incremental(y, 200, "10 ms integration");
+    assert(Car_PidInc_init(&p, 0, 0, 0, 1000));
+    assert(Car_PidInc_configure(&p, 1, 0.02f, 1, 10, 2, 0.1f));
+    check_incremental(Car_PidInc_update_dt(&p, 150, 150, 50, 0.005f), 315,
+                      "feedforward terms");
+    check_incremental(Car_PidInc_update_dt(&p, -150, -150, -50, 0.005f), -315,
+                      "reverse feedforward terms");
+    assert(Car_PidInc_init(&p, 0, 0, 50, 1000));
+    check_incremental(Car_PidInc_update(&p, 0, 0), 0, "initial derivative");
+    check_incremental(Car_PidInc_update(&p, 100, 0), 0, "no setpoint derivative kick");
+    check_incremental(Car_PidInc_update(&p, 100, 1), -10, "filtered measurement derivative");
+}
+
+static void test_incremental_matches_positional(void)
+{
+    Car_Pid_Struct pos;
+    Car_PidInc_Struct inc;
+    unsigned i, seed = 12345;
+    assert(Car_Pid_init(&pos, 12, 0.3f, 8, 1000));
+    assert(Car_PidInc_init(&inc, 12, 0.3f, 8, 1000));
+    assert(Car_Pid_configure(&pos, 0.65f, 0.02f, 0.6f, 20, 1.2f, 0.1f));
+    assert(Car_PidInc_configure(&inc, 0.65f, 0.02f, 0.6f, 20, 1.2f, 0.1f));
+    for (i = 0; i < 20000; i++)
+    {
+        float target, measure, acceleration, dt, expected, actual;
+        seed = seed * 1664525U + 1013904223U;
+        target = (float)((int)(seed % 361U) - 180);
+        seed = seed * 1664525U + 1013904223U;
+        measure = (float)((int)(seed % 361U) - 180);
+        seed = seed * 1664525U + 1013904223U;
+        acceleration = (float)((int)(seed % 401U) - 200);
+        dt = (1U + seed % 15U) * 0.001f;
+        expected = Car_Pid_update_dt(&pos, target, measure, acceleration, dt);
+        actual = Car_PidInc_update_dt(&inc, target, measure, acceleration, dt);
+        check_incremental(actual, expected, "mixed terms with saturation and jitter");
+        check_incremental(inc.integral, pos.integral, "conditional integration parity");
+        assert(!pos.fault && !inc.fault);
+        if (incremental_failures) break;
+    }
+}
 
 int main(void)
 {
@@ -75,6 +209,17 @@ int main(void)
         }
       }
     }
-    puts("advanced speed controller: all checks passed");
+    test_incremental_saturation_recovery();
+    test_incremental_rejected_integration();
+    test_incremental_integral_limit();
+    test_incremental_reset_and_faults();
+    test_incremental_terms_and_timing();
+    test_incremental_matches_positional();
+    if (incremental_failures)
+    {
+        fprintf(stderr, "incremental PID: %u failed checks\n", incremental_failures);
+        return 1;
+    }
+    puts("advanced speed controller: all checks passed (including 6 incremental PID scenarios)");
     return 0;
 }

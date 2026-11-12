@@ -420,7 +420,8 @@ void Car_PidInc_reset(Car_PidInc_Struct *p)
     p->integral = 0.0f;        /* 积分项清零 */
     p->last_measure = 0.0f;    /* 上一拍测量值清零 */
     p->derivative = 0.0f;      /* 滤波后的测量变化率清零 */
-    p->last_output = 0.0f;     /* 上一拍输出清零，下次从 0 累加 */
+    p->last_output = 0.0f;     /* 上一拍执行器输出清零 */
+    p->unclamped_output = 0.0f; /* 未限幅递推基准清零，下次从 0 累加 */
     p->last_p_term = 0.0f;     /* 上一拍比例项清零 */
     p->last_d_term = 0.0f;     /* 上一拍微分项清零 */
     p->last_ff_term = 0.0f;    /* 上一拍前馈项清零 */
@@ -540,7 +541,8 @@ uint8_t Car_PidInc_configure(Car_PidInc_Struct *p, float beta, float tau,
  *               Δu = ΔP + ΔI + ΔD + ΔFF
  *               u[k] = u[k-1] + Δu
  *           其中 ΔP、ΔD、ΔFF 分别是本周期项值与上一周期项值之差，
- *           ΔI 是积分项的本次变化量。各项定义与位置式相同。
+ *           ΔI 是最终接纳的积分变化量，u 是未限幅的累加值；
+ *           执行器限幅仅作用于返回值。各项定义与位置式相同。
  */
 float Car_PidInc_update_dt(Car_PidInc_Struct *p, float target, float measure,
                            float acceleration, float dt)
@@ -549,6 +551,8 @@ float Car_PidInc_update_dt(Car_PidInc_Struct *p, float target, float measure,
     float raw_d = 0.0f;                                    /* 未滤波的测量变化率，rpm/s */
     float d_alpha;                                         /* 微分低通系数 */
     float integral_candidate;                              /* 限幅后的积分项候选值 */
+    float integral_delta;                                  /* 本次实际接纳的积分增量 */
+    float base;                                            /* P/D/FF 总和，用于条件积分判定 */
     float delta;                                           /* 本周期输出增量 Δu */
     float candidate;                                       /* 上一拍输出 + 增量，未限幅 */
     float output;                                          /* 限幅后的最终输出 */
@@ -609,20 +613,21 @@ float Car_PidInc_update_dt(Car_PidInc_Struct *p, float target, float measure,
         goto invalid;
     }
 
-    /* 增量式核心：各项本拍值与上一拍值分别作差后相加。 */
+    /* 增量式核心：使用未限幅的累加基准，保留饱和时 P/D/FF 的完整历史。 */
+    integral_delta = integral_candidate - p->integral;
+    base = p->p_term + p->d_term + p->ff_term;
     delta = (p->p_term - p->last_p_term)
-          + (integral_candidate - p->integral)
+          + integral_delta
           + (p->d_term - p->last_d_term)
           + (p->ff_term - p->last_ff_term);
 
-    candidate = p->last_output + delta;                    /* 未限幅的累加输出 */
+    /* 与位置式使用相同的绝对项判断积分，避免递推舍入误差改变临界点决策。 */
+    candidate = base + integral_candidate;
 
     if (!number(delta) || !number(candidate))
     {
         goto invalid;
     }
-
-    output = clip(candidate, p->output_limit);             /* 执行器限幅 */
 
     /*
      * 条件积分抗饱和（与位置式同思路）：
@@ -634,9 +639,24 @@ float Car_PidInc_update_dt(Car_PidInc_Struct *p, float target, float measure,
     {
         p->integral = integral_candidate;                  /* 接收本次积分增量 */
     }
+    else
+    {
+        /* 拒绝积分时，输出与递推历史也必须撤去这部分增量。 */
+        delta = (p->p_term - p->last_p_term)
+              + (p->d_term - p->last_d_term)
+              + (p->ff_term - p->last_ff_term);
+    }
+
+    candidate = p->unclamped_output + delta;
+    if (!number(delta) || !number(candidate))
+    {
+        goto invalid;
+    }
 
     p->saturated = (candidate > p->output_limit || candidate < -p->output_limit);
-    p->last_output = output;                               /* 保存限幅后的值，供下次累加 */
+    p->unclamped_output = candidate;                        /* 保存完整递推基准 */
+    output = clip(candidate, p->output_limit);              /* 仅对执行器输出限幅 */
+    p->last_output = output;
 
     /* 保存本拍各项值，供下一周期作差得到增量。 */
     p->last_p_term = p->p_term;
