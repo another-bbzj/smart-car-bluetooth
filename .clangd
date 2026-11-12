@@ -1,0 +1,41 @@
+# 仅供 clangd 做补全/跳转，不参与实际编译（编译由 EIDE + AC5 完成）。
+# 必须放在仓库根目录：源码在 User/ Library/ CODE/，而 EIDE 生成的
+# MDK-ARM/.clangd 不是它们的祖先目录，clangd 读不到那一份。
+CompileFlags:
+  CompilationDatabase: MDK-ARM/build/NEUQ_STM32F407VET6_Opensource_Library
+  # 覆盖 argv[0]：否则 clang 会按 armcc.exe 的目录去找
+  # lib/clang-runtimes/arm-none-eabi/include（AC5 没有这个布局），导致找不到 stdio.h
+  Compiler: clang
+  Remove:
+    - --apcs=*
+    - --cpu
+    - Cortex-M4.fp
+    - --li
+    - --c99
+    - --split_sections
+    - --enum_is_int
+    - --diag_suppress=*
+    - --no_depend_system_headers
+    - --depend
+    - '-o'
+    - '.\build\*'
+  Add:
+    - --target=arm-none-eabi
+    - -mcpu=cortex-m4
+    - -mthumb
+    - -mfpu=fpv4-sp-d16
+    - -mfloat-abi=hard
+    # gnu99 而非 c99：clang 的 -std=c99 会定义 __STRICT_ANSI__，使 stdio.h 给出
+    # struct __FILE 的完整定义，与 NEUQ_UART_Debug.c 的重定向冲突；AC5 --c99 不定义它
+    - -std=gnu99
+    # AC6 的 libc 头文件，给 clang 用比 AC5 的更干净
+    - -isystemC:/Keil_v5/ARM/ARMCLANG/include
+Diagnostics:
+  UnusedIncludes: None
+  Suppress: [pp_including_mainfile_in_preamble]
+---
+# 这些头文件不自包含，需要先有 stm32f4xx.h（只在单独打开它们时起作用）
+If:
+  PathMatch: Library/HAL_lib/Core/Inc/(stm32f4xx_hal_conf|system_stm32f4xx|mpu_armv7)\.h
+CompileFlags:
+  Add: [-include, stm32f4xx.h]
