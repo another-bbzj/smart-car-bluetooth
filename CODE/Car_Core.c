@@ -70,6 +70,7 @@
 #include "Car_Config.h"
 
 #include <string.h>
+#include <float.h>
 
 /* ========================================================================== */
 /*                              内部工具函数                                   */
@@ -112,6 +113,61 @@ static float clamp(float x, float lim)
     }
 
     return x;        /* 未超限原样返回 */
+}
+
+/* 接收的是经协议校验的快照；只消费曲率，预瞄点横向位置不是车体横向误差。 */
+void Car_SetVisionObservation(Car_Core *c, const CarVisionObservation *o, uint32_t now_ms)
+{
+    uint32_t elapsed;
+    if (!o || !o->session || !(o->valid_mask & VISION_CURVATURE_VALID) ||
+        !(o->confidence >= CAR_AUTO_MIN_CONFIDENCE && o->confidence <= 1.0f) ||
+        !(o->curvature_inv_m <= CAR_AUTO_MAX_CURVATURE &&
+          o->curvature_inv_m >= -CAR_AUTO_MAX_CURVATURE))
+    {
+        c->vision_present = 0;
+        return;
+    }
+    elapsed = now_ms - o->received_ms;
+    if (elapsed >= CAR_AUTO_MAX_AGE_MS ||
+        o->processing_age_ms >= CAR_AUTO_MAX_AGE_MS - elapsed)
+    {
+        c->vision_present = 0;
+        return;
+    }
+    /* 相同帧只可增加估计年龄，不能通过重复调用让停止更新的相机保活。 */
+    if (c->vision_session != o->session || c->vision_sequence != o->sequence)
+    {
+        c->vision_age_us = (elapsed + o->processing_age_ms) * 1000U;
+        c->vision_session = o->session;
+        c->vision_sequence = o->sequence;
+        c->vision_present = 1;
+        c->vision_curvature = o->curvature_inv_m;
+    }
+    else if ((elapsed + o->processing_age_ms) * 1000U > c->vision_age_us)
+    {
+        c->vision_age_us = (elapsed + o->processing_age_ms) * 1000U;
+    }
+}
+
+static uint8_t auto_observation_ready(const Car_Core *c)
+{
+    return c->vision_present && c->vision_age_us < CAR_AUTO_MAX_AGE_MS * 1000U;
+}
+
+/* 左正曲率：左轮慢、右轮快；同比限幅保持路径曲率。 */
+static uint8_t auto_targets(Car_Core *c)
+{
+    float turn = c->vision_curvature * c->auto_track_m * 0.5f;
+    float rpm, peak, scale;
+    if (!(c->auto_diameter_m > 0.0f && c->auto_diameter_m <= FLT_MAX) ||
+        !(turn >= -0.8f && turn <= 0.8f)) return 0;
+    rpm = c->auto_speed_m_s * 60.0f / (3.14159265358979323846f * c->auto_diameter_m);
+    peak = rpm * (1.0f + absolute(turn));
+    if (!(peak >= 0.0f && peak <= FLT_MAX)) return 0;
+    scale = peak > CAR_AUTO_RPM_LIMIT ? CAR_AUTO_RPM_LIMIT / peak : 1.0f;
+    c->target[0] = rpm * (1.0f - turn) * scale;
+    c->target[1] = rpm * (1.0f + turn) * scale;
+    return 1;
 }
 
 /*
@@ -320,6 +376,7 @@ static void execute(Car_Core *c)
             }
 
             reset_motion(c);              /* 清空旧目标和历史 */
+            c->mode = CAR_MODE_MANUAL;
             c->link_us = 0;               /* 重置通信看门狗 */
             c->state = CAR_RUN;           /* 进入运行状态 */
             break;
@@ -328,13 +385,14 @@ static void execute(Car_Core *c)
             /* STOP：清除故障并立即归零，不等待速度规划曲线自然结束。 */
             reset_motion(c);              /* 立即清零输出 */
             c->state = CAR_STOP;          /* 回到停车状态 */
+            c->mode = CAR_MODE_MANUAL;
             c->fault = 0;                 /* 清除故障码 */
             c->link_us = 0;               /* 重置通信看门狗 */
             break;
 
         case 3:
             /* WHEELS：左、右目标转速；双轮都为零时立即复位运动状态。 */
-            if (c->state != CAR_RUN)
+            if (c->state != CAR_RUN || c->mode != CAR_MODE_MANUAL)
             {
                 c->result = 1;            /* 非运行状态拒绝转速命令 */
                 break;
@@ -397,6 +455,28 @@ static void execute(Car_Core *c)
             }
             break;
 
+        case 6:
+        {
+            uint16_t diameter = u16(c->data);
+            uint16_t track = u16(c->data + 2);
+            uint16_t speed = u16(c->data + 4);
+            if (c->state != CAR_STOP) { c->result = 1; break; }
+            if (diameter < 20 || diameter > 200 || track < 50 || track > 500 ||
+                speed < 20 || speed > 150) { c->result = 2; break; }
+            if (!auto_observation_ready(c) || absolute(c->speed[0]) >= 5.0f ||
+                absolute(c->speed[1]) >= 5.0f) { c->result = 1; break; }
+            c->auto_diameter_m = diameter * 0.001f;
+            c->auto_track_m = track * 0.001f;
+            c->auto_speed_m_s = speed * 0.001f;
+            if (!auto_targets(c)) { reset_motion(c); c->result = 2; break; }
+            reset_motion(c);
+            c->auto_session = c->vision_session;
+            c->mode = CAR_MODE_AUTO;
+            c->link_us = 0;
+            c->state = CAR_RUN;
+            break;
+        }
+
         default:
             c->result = 3;                /* 未知命令 */
             break;
@@ -427,14 +507,15 @@ void Car_FeedByte(Car_Core *c, uint8_t byte)
      * 下标 0 占位，保证可以直接用命令号索引；先核验长度，
      * 才能保证后续写入 c->data[7] 不会越界。
      */
-    static const uint8_t lengths[6] =
+    static const uint8_t lengths[7] =
     {
         255,                                         /* 下标 0：无效命令占位 */
         0,                                           /* 命令 1：ARM，无负载 */
         0,                                           /* 命令 2：STOP，无负载 */
         4,                                           /* 命令 3：WHEELS，左右各 2 字节 */
         7,                                           /* 命令 4：PID，轮号 + 3 个 uint16 */
-        0                                            /* 命令 5：HEARTBEAT，无负载 */
+        0,                                           /* 命令 5：HEARTBEAT，无负载 */
+        6                                            /* 命令 6：AUTO_ARM，三个 uint16 */
     };
 
     /*
@@ -479,7 +560,7 @@ void Car_FeedByte(Car_Core *c, uint8_t byte)
 
         case 3:
             /* 状态 3：接收长度；命令号或长度非法时丢弃当前帧。 */
-            if (c->cmd < 1 || c->cmd > 5 || byte != lengths[c->cmd])
+            if (c->cmd < 1 || c->cmd > 6 || byte != lengths[c->cmd])
             {
                 c->parse_state = (byte == 0xC3) ? 1 : 0;
                 c->result = 3;                       /* 帧格式错误 */
@@ -575,6 +656,19 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
         (c->link_us += dt_us) >= CAR_LINK_TIMEOUT_MS * 1000U)
     {
         Car_Fault(c, CAR_LINK_FAULT);
+    }
+
+    if (c->vision_age_us < CAR_AUTO_MAX_AGE_MS * 1000U)
+    {
+        c->vision_age_us += dt_us;
+    }
+    if (c->state == CAR_RUN && c->mode == CAR_MODE_AUTO)
+    {
+        if (!auto_observation_ready(c) || c->auto_session != c->vision_session ||
+            !auto_targets(c))
+        {
+            Car_Fault(c, CAR_VISION_FAULT);
+        }
     }
 
     /* 运行状态下推进双轮共享进度的五次参考曲线。 */

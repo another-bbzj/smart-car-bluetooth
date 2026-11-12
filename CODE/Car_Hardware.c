@@ -442,6 +442,7 @@ void Car_PIT_Handler(void)
     uint32_t dt_us;                              /* 实际控制周期，微秒 */
     int32_t l;                                   /* 左轮本周期编码器增量 */
     int32_t r;                                   /* 右轮本周期编码器增量 */
+    CarVisionObservation observation;
 
     sample_us = control_clock_ready
               ? __HAL_TIM_GET_COUNTER(&control_clock)
@@ -465,6 +466,23 @@ void Car_PIT_Handler(void)
     }
 
     last_control_us = sample_us;                 /* 保存本次时刻，供下周期求差 */
+
+    /* 串口异常须在本拍电机输出前使观测失效；正常视觉解析仍有界放在输出后。 */
+    if (vision_rx_fault)
+    {
+        CarVision_Invalidate(&vision);
+        for (n = 0; n < sizeof(vision_buffer) &&
+             NEUQ_FIFO_read_byte(&vision_fifo, &byte) == NEUQ_FIFO_OK; n++) {}
+        vision_rx_fault = 0;
+    }
+    if (CarVision_GetObservation(&vision, HAL_GetTick(), &observation))
+    {
+        Car_SetVisionObservation(&car, &observation, HAL_GetTick());
+    }
+    else
+    {
+        Car_SetVisionObservation(&car, 0, HAL_GetTick());
+    }
 
     /*
      * 蓝牙字节可能丢失，此时不再信任残留队列：
@@ -498,7 +516,8 @@ void Car_PIT_Handler(void)
 
     /*
      * 更新电机后再处理视觉，每周期最多解析 64 字节；视觉解析器只更新观测。
-     * 蓝牙接收异常触发停车，视觉接收异常仅使视觉缓存失效。
+     * 这里捕获本拍中途出现的视觉异常并作废缓存；自主模式下一拍检查后停车。
+     * 手动模式不依赖视觉，仍由蓝牙接收异常直接触发停车。
      */
     if (vision_rx_fault)
     {
