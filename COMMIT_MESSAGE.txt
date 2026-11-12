@@ -1,0 +1,17 @@
+refactor(car): 整理自研代码格式并拆分外设模块
+
+- 新增 Car_Utils/Car_Motor/Car_Encoder/Car_Link 模块，按外设拆分原 Car_Hardware.c
+- 合并 Car_Core/Car_Vision/Car_PID 中重复的绝对值、限幅、大端读取函数
+- 自研代码中的 __HAL_TIM_GET_COUNTER、HAL_UART_Receive_IT 改用 NEUQ 库接口
+- 统一 4 空格缩进、函数头注释、变量中文注释，翻译英文注释
+- 修正 CarVision_Invalidate、My_Vofa_poll 与实现不符的注释
+- 补全 NEUQ_Uart.h 中断使能原型，NEUQ_lib_include.h 引入 Car_Utils.h
+- Keil 工程新增 CODE 分组，修复自研源码未参与构建的问题
+- 新增自研增量式 PID Car_IncPid_*，CAR_PID_USE_INCREMENTAL 默认 0
+- 报告补充 NEUQ PID 对比与 EIDE 构建验证
+
+验证：ARMCC 5.06 全量编译 132 个 C 文件 0 error，链接 0 error；
+EIDE 构建器 --rebuild 0 error（位置式/增量式均验证），输出 hex/s19/bin；
+默认位置式 ROM 15228 B -> 15308 B（+80 B）、RAM 6520 B；
+增量模式 ROM 15468 B、RAM 6592 B（+160 B / +72 B）。
+未删除任何公开 API；保留自研 PID（理由见 修改报告.md 第 10 节）；未在实车运行。

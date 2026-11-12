@@ -1,26 +1,148 @@
 #ifndef CAR_CORE_H
 #define CAR_CORE_H
+
+/*********************************************************************************************************************
+* 文件名称          Car_Core.h
+* 功能说明          双轮差速车控制核心的数据结构与接口声明。
+*
+*                   控制核心把"通信命令、状态机、轮速目标、速度环、保护逻辑"集中在一个对象里，
+*                   由 Car_Hardware 的 5ms 控制拍驱动。外部模块只通过下面这些函数访问，
+*                   不直接修改内部字段。
+*
+*                   蓝牙命令帧格式：C3 3C CMD LEN DATA CRC8
+*                   · CMD=1  ARM       ：停车状态下使能，进入运行状态
+*                   · CMD=2  STOP      ：停车、清故障、取消使能
+*                   · CMD=3  WHEELS    ：左右轮目标转速，各一个大端 int16（rpm）
+*                   · CMD=4  PID       ：轮号 0/1 + Kp/Ki/Kd，各一个大端 uint16（乘 100）
+*                   · CMD=5  HEARTBEAT ：运行中续租链路
+*                   CRC8 多项式 0x07、初值 0，覆盖 CMD~DATA。
+*                   命令结果：0 成功，1 状态拒绝，2 数值非法，3 帧非法。
+*
+* 修改记录
+* 日期              作者                备注
+* 2026-09-27                            first version
+* 2026-11-12                            补充字段注释，公共工具改用 Car_Utils
+********************************************************************************************************************/
 #include <stdint.h>
+#include "Car_Config.h"
 #include "Car_PID.h"
-enum { CAR_STOP, CAR_RUN, CAR_FAULT };
-enum { CAR_NO_FAULT, CAR_LINK_FAULT, CAR_STALL_FAULT,
-       CAR_DIRECTION_FAULT, CAR_RX_FAULT };
-/* Commands: 1 ARM, 2 STOP, 3 WHEELS(i16be x2),
- * 4 PID(wheel 0/1, u16be kp/ki/kd scaled100), 5 HEARTBEAT.
- * Frame: C3 3C CMD LEN DATA CRC8(poly07, init0, CMD through DATA).
- * Results: 0 OK, 1 state rejected, 2 value invalid, 3 frame invalid. */
+
+/* 整车状态机：上电默认 STOP，只有 ARM 后才进入 RUN，任何保护触发都进入 FAULT */
+enum {
+    CAR_STOP = 0,       /* 停车：输出强制为 0，可受理 ARM 和 PID 参数修改 */
+    CAR_RUN,            /* 运行：受理轮速与心跳，速度环工作 */
+    CAR_FAULT           /* 故障：输出为 0，必须先发 STOP 再重新 ARM */
+};
+
+/* 故障码：写入 Car_Core.fault，供遥测和上层诊断使用 */
+enum {
+    CAR_NO_FAULT = 0,   /* 无故障 */
+    CAR_LINK_FAULT,     /* 链路故障：运行中超过 CAR_LINK_TIMEOUT_MS 没有有效命令 */
+    CAR_STALL_FAULT,    /* 堵转故障：输出足够但实测转速持续过低 */
+    CAR_DIRECTION_FAULT,/* 方向故障：目标与实测长期反向 */
+    CAR_RX_FAULT        /* 接收故障：串口溢出/帧错误导致接收 FIFO 异常 */
+};
+
+/* 整车控制核心：一个对象保存两轮的全部控制状态 */
 typedef struct {
-    Car_Pid_Struct pid[2];
-    float target[2], reference[2], speed[2], output[2];
-    uint16_t link_ms, stall_ms[2], direction_ms[2], frame_ms;
-    float slow_speed[2];
-    uint32_t frames;
-    uint8_t state, fault, result;
-    uint8_t parse_state, cmd, length, index, crc, data[7];
-} Car_Core;
-void Car_Init(Car_Core *c);
-uint8_t Car_Crc8(uint8_t crc, uint8_t byte);
-void Car_FeedByte(Car_Core *c, uint8_t byte);
-void Car_Tick(Car_Core *c, int32_t left_count, int32_t right_count);
-void Car_Fault(Car_Core *c, uint8_t fault);
+    Car_Pid_Struct pid[2];              /* 位置式速度环 PID：0 左轮，1 右轮 */
+#if CAR_PID_USE_INCREMENTAL
+    Car_IncPid_Struct inc_pid[2];       /* 增量式速度环 PID：仅 CAR_PID_USE_INCREMENTAL=1 时占用 RAM */
 #endif
+    float target[2];                    /* 轮速目标（rpm），来自 WHEELS 命令并已限幅 */
+    float reference[2];                 /* 斜坡后的参考转速（rpm），作为 PID 的输入 */
+    float speed[2];                     /* 实测转速（rpm），由编码器增量换算并低通滤波 */
+    float output[2];                    /* 速度环输出（PWM 计数），正负表示方向 */
+    uint16_t link_ms;                   /* 链路续租计时（ms）：运行中每拍累加，收到有效命令清零 */
+    uint16_t stall_ms[2];               /* 左右轮堵转计时（ms） */
+    uint16_t direction_ms[2];           /* 左右轮方向异常计时（ms） */
+    uint16_t frame_ms;                  /* 当前残帧的字节间隔计时（ms），超时则丢弃残帧 */
+    float slow_speed[2];                /* 实测转速绝对值的慢速滤波值，用于方向异常判断 */
+    uint32_t frames;                    /* 累计收到的合法命令帧数，仅用于遥测/诊断 */
+    uint8_t state;                      /* 状态机：CAR_STOP / CAR_RUN / CAR_FAULT */
+    uint8_t fault;                      /* 最近一次故障码，见上面的故障枚举 */
+    uint8_t result;                     /* 最近一条命令的结果码：0 成功，1 状态拒绝，2 数值非法，3 帧非法 */
+    uint8_t parse_state;                /* 帧解析状态机：0 找帧头，1 等第二帧头，2 收 CMD，3 收 LEN，4 收 DATA，5 收 CRC */
+    uint8_t cmd;                        /* 当前帧的命令字 */
+    uint8_t length;                     /* 当前帧的 DATA 长度（已按 CMD 校验） */
+    uint8_t index;                      /* 当前帧 DATA 的写入下标 */
+    uint8_t crc;                        /* 当前帧的 CRC8 累加值 */
+    uint8_t data[7];                    /* 当前帧 DATA 缓存，最长 7 字节（PID 命令） */
+} Car_Core;
+
+/*-------------------------------------------------------------------------------------------------------------------
+ * 函数名称    Car_Init
+ * 功能说明    初始化整车控制核心：整块清零，并为左右轮创建默认参数的速度环 PID。
+ * 用法        上电初始化阶段调用一次，必须早于 Car_FeedByte / Car_Tick。
+ * 参数说明    c —— 待初始化的 Car_Core 对象指针
+ * 返回说明    无
+ * 示例        static Car_Core car;
+ *             Car_Init(&car);
+ * 备注        初始化后处于 CAR_STOP、无故障；PID 默认参数来自 Car_Config.h。
+ *-------------------------------------------------------------------------------------------------------------------*/
+void Car_Init(Car_Core *c);
+
+/*-------------------------------------------------------------------------------------------------------------------
+ * 函数名称    Car_Crc8
+ * 功能说明    按 CRC-8 逐字节更新校验值（多项式 0x07、初值 0），用于蓝牙命令帧校验。
+ * 用法        发送端对 CMD、LEN、DATA 依次迭代；接收端解析时逐字节调用，最后与帧尾 CRC 比较。
+ * 参数说明    crc  —— 上一次的 CRC 值，第一次传 0
+ *             byte —— 本次参与计算的字节
+ * 返回说明    更新后的 8 位 CRC
+ * 示例        uint8_t crc = 0;
+ *             crc = Car_Crc8(crc, 0x02);
+ * 备注        标准校验值：对 ASCII "123456789" 计算结果为 0xF4。
+ *-------------------------------------------------------------------------------------------------------------------*/
+uint8_t Car_Crc8(uint8_t crc, uint8_t byte);
+
+/*-------------------------------------------------------------------------------------------------------------------
+ * 函数名称    Car_FeedByte
+ * 功能说明    逐字节接收蓝牙串口数据并做状态机解析：寻找 C3 3C 帧头、校验 CMD/LEN、累积 DATA、
+ *             校验 CRC8；校验通过后执行命令。
+ * 用法        在串口接收中断或控制拍收帧处，每收到 1 字节调用一次；
+ *             不要在多个上下文并发调用同一个对象。
+ * 参数说明    c    —— 控制核心对象指针
+ *             byte —— 本次收到的字节
+ * 返回说明    无（解析结果反映在 c->state / c->target / c->result 等字段）
+ * 示例        void Car_UART_RX_Handler(uint8_t byte) {
+ *                 Car_FeedByte(&car, byte);
+ *             }
+ * 备注        1) 帧格式：C3 3C CMD LEN DATA CRC8；
+ *             2) 只接受 CMD 1~5 且 LEN 与规定长度一致，否则丢帧；
+ *             3) 帧内字节间隔超过 CAR_FRAME_TIMEOUT_MS 时由 Car_Tick 丢弃残帧；
+ *             4) CRC 错误的帧不会续租链路，正在运行的车会因超时停车。
+ *-------------------------------------------------------------------------------------------------------------------*/
+void Car_FeedByte(Car_Core *c, uint8_t byte);
+
+/*-------------------------------------------------------------------------------------------------------------------
+ * 函数名称    Car_Tick
+ * 功能说明    5ms 控制拍：处理残帧超时、链路超时保护，把编码器计数换算为 rpm 并低通滤波，
+ *             执行目标斜坡、速度环 PID、零速复位，以及堵转与反馈方向异常保护。
+ * 用法        由 5ms 定时中断周期性调用，每个周期传入两轮自上一拍以来的编码器增量。
+ * 参数说明    c           —— 控制核心对象指针
+ *             left_count  —— 左轮本周期编码器增量（已按方向取符号）
+ *             right_count —— 右轮本周期编码器增量（已按方向取符号）
+ * 返回说明    无（结果写入 c->speed / c->reference / c->output，故障时进入 CAR_FAULT）
+ * 示例        Car_Tick(&car, left_delta, right_delta);
+ * 备注        1) 运行中 500ms 没有有效轮速/心跳 -> 通信故障；
+ *             2) 参考转速≥40rpm、输出≥1500 而实测<10rpm 持续 1.5s -> 堵转故障；
+ *             3) 目标与实测反向、输出接近限幅且转速>100rpm 持续 1s -> 方向故障；
+ *             4) 非运行状态输出强制为 0，但实测转速仍持续更新供回传使用。
+ *-------------------------------------------------------------------------------------------------------------------*/
+void Car_Tick(Car_Core *c, int32_t left_count, int32_t right_count);
+
+/*-------------------------------------------------------------------------------------------------------------------
+ * 函数名称    Car_Fault
+ * 功能说明    进入故障状态：清除所有运动量、置故障码、丢弃当前解析中的残帧，两轮输出归零。
+ * 用法        通信超时、堵转、方向异常、串口错误等保护条件成立时调用；
+ *             故障后必须先 STOP 再 ARM。
+ * 参数说明    c     —— 控制核心对象指针
+ *             fault —— 故障码，取值 CAR_LINK_FAULT / CAR_STALL_FAULT /
+ *                      CAR_DIRECTION_FAULT / CAR_RX_FAULT
+ * 返回说明    无
+ * 示例        Car_Fault(&car, CAR_LINK_FAULT);
+ * 备注        本函数不会自动恢复；恢复流程为"STOP -> ARM"，目标从零重新开始。
+ *-------------------------------------------------------------------------------------------------------------------*/
+void Car_Fault(Car_Core *c, uint8_t fault);
+
+#endif /* CAR_CORE_H */

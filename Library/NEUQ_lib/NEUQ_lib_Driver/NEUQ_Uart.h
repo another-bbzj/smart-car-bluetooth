@@ -57,4 +57,12 @@ void NEUQ_Uart_write_byte(UART_DEV_ENUM DEV_select,uint8_t byte);
 void NEUQ_Uart_write_string(UART_DEV_ENUM DEV_select,uint8_t *str);
 void NEUQ_Uart_write_data(UART_DEV_ENUM DEV_select,uint8_t *pdata,uint32_t len);
 
-#endif 
+/* 使能串口接收中断：设置 NVIC 优先级、打开中断，并启动 1 字节中断接收。
+ * 工程中 Car_Main 用它开启蓝牙/视觉接收；HAL_UART_ErrorCallback 也用它重新开接收。
+ * 使用示例：NEUQ_Uart_Enable_RX_Interrupt(UART_3, 3); */
+void NEUQ_Uart_Enable_RX_Interrupt(UART_DEV_ENUM DEV_select,uint8_t priority);
+
+/* 使能串口发送完成中断（当前工程未使用，保留库原有接口声明）。 */
+void NEUQ_Uart_Enable_TX_Interrupt(UART_DEV_ENUM DEV_select,uint8_t priority);
+
+#endif

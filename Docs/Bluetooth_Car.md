@@ -36,7 +36,7 @@ JDY-31 带底板版本 VCC 按手册接3.6–6V（建议5V），裸模块 VCC �
 ## 3. 编译与烧录
 
 1. 打开 `MDK-ARM/NEUQ_STM32F407VET6_Opensource_Library.uvprojx`，使用现有 ARM Compiler 5，Rebuild。
-2. 已在工程中加入 `Car_Core.c`、`Car_Hardware.c`，无需手动加文件。
+2. 已在工程中加入 `CODE` 分组（`Car_Core.c`、`Car_Hardware.c`、`Car_PID.c`、`Car_Vision.c`、`My_Vofa.c`、`Car_Utils.c`、`Car_Motor.c`、`Car_Encoder.c`、`Car_Link.c`），无需手动加文件；各模块职责见 `CODE/readme.txt`。
 3. 烧录输出：`MDK-ARM/NEUQ_STM32F407VET6_Opensource_Library/NEUQ_STM32F407VET6_Opensource_Library.hex`。也可以用 Keil Download 经 ST-Link/SWD 下载。
 4. 上电保持停车，必须收到合法使能，再收到轮速指令才运动。复位和掉电后不会恢复原来的运动。
 
