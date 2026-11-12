@@ -1,60 +1,62 @@
 #ifndef CAR_CONFIG_H
 #define CAR_CONFIG_H
 
-/* 按参考原理图约定：通道 1 为左轮，通道 2 为右轮。
- * 实际轮位、方向电平及编码器符号需在车轮架空时核对。 */
-/* NEUQ 库设备索引：3 对应蓝牙 UART4，2 对应视觉 USART3。 */
-#define CAR_UART_INDEX          3
-#define CAR_UART_BAUD           UART_BAUD_9600
-/* 香橙派视觉独立串口：USART3，PB10 TX / PB11 RX。 */
-#define CAR_VISION_UART_INDEX   2
-#define CAR_VISION_UART_BAUD    UART_BAUD_115200
+/* Reference schematics: channel 1 is assigned LEFT, channel 2 RIGHT.
+ * Verify physical wheel placement and signs with the chassis lifted. */
+
+/* ---------- 串口 ---------- */
+#define CAR_UART_INDEX          3          /* 蓝牙遥控串口编号：UART4（NEUQ_Uart 按 0 起索引） */
+#define CAR_UART_BAUD           UART_BAUD_9600    /* 蓝牙串口波特率：9600 */
+/* Orange Pi vision: USART3, PB10 TX / PB11 RX, separate from Bluetooth. */
+#define CAR_VISION_UART_INDEX   2          /* 视觉串口编号：USART3（PB10 TX / PB11 RX），与蓝牙独立 */
+#define CAR_VISION_UART_BAUD    UART_BAUD_115200  /* 视觉串口波特率：115200 */
 #if CAR_UART_INDEX != 3 || CAR_VISION_UART_INDEX != 2
 #error This board adapter currently supports Bluetooth UART4 and vision USART3 only
 #endif
-#define CAR_MOTOR_NOLOAD_RPM    1000.0f /* 用户给定的输出轴空载转速；指令限速由 CAR_RPM_LIMIT 决定。 */
-#define CAR_FLASH_CS            PB0  /* V2 核心板 W25Q 片选；复用 PA5/6/7 前拉高 */
-#define CAR_LEFT_PWM            TIM8_CH1_PC6
-#define CAR_LEFT_DIR            PC7
-#define CAR_RIGHT_PWM           TIM2_CH3_PA2
-#define CAR_RIGHT_DIR           PA5
-/* 正转时方向引脚的电平，以及编码器计数是否反号；前进时反馈应为正。 */
-#define CAR_LEFT_FORWARD_HIGH   1
-#define CAR_RIGHT_FORWARD_HIGH  1
-#define CAR_LEFT_ENCODER_INVERT 1
-#define CAR_RIGHT_ENCODER_INVERT 1
-#define CAR_PWM_HZ              8000U
-/* 标称控制周期 5 ms；每 20 次控制周期发送一次遥测，标称 100 ms。 */
-#define CAR_PERIOD_MS           5U
-#define CAR_TELEMETRY_TICKS     20U
-/* 编码器 CPR 暂按 11 脉冲 × 四倍频 × 减速比 10 估算，须实测输出轴一圈计数。
- * 仅凭 JGB37-520 型号和 1000 rpm 无法确定脉冲数或减速比。 */
-#define CAR_ENCODER_CPR         (11.0f * 4.0f * 10.0f)
-/* 指令限速（rpm）、PWM 数值限幅、参考加速度（rpm/s）及加加速度（rpm/s²）。 */
-#define CAR_RPM_LIMIT           180.0f
-/* NEUQ 库 PWM_MAX=10000 对应 100%，3500 即最大 35% 占空比。 */
-#define CAR_PWM_LIMIT           3500.0f
-#define CAR_ACCEL_LIMIT_RPM_S   200.0f
-#define CAR_JERK_LIMIT_RPM_S2    800.0f
-/* 允许的实测控制周期范围（微秒）；超出范围触发时序故障。 */
-#define CAR_MIN_CONTROL_US      1000U
-#define CAR_MAX_CONTROL_US      15000U
-/* 实测速度低通时间常数（秒）；值越大越平滑，同时反馈延迟越大。 */
-#define CAR_SPEED_FILTER_TAU_S  0.005f
-/* 前馈系数须在本车辨识：Ks 为 PWM 数值，Kv 为 PWM/rpm，Ka 为 PWM/(rpm/s)。 */
-#define CAR_FF_KS               0.0f
-#define CAR_FF_KV               0.0f
-#define CAR_FF_KA               0.0f
-/* 微分测量低通时间常数（秒）；目标权重只影响比例项，1 表示使用完整目标。 */
-#define CAR_PID_D_TAU_S         0.020f
-#define CAR_PID_SETPOINT_WEIGHT 1.0f
-/* 各项超时单位为毫秒：有效运行通信、帧字节间隔、堵转、方向异常。 */
-#define CAR_LINK_TIMEOUT_MS     500U
-#define CAR_FRAME_TIMEOUT_MS    100U
-#define CAR_STALL_TIMEOUT_MS    1500U
-#define CAR_DIRECTION_TIMEOUT_MS 1000U
-/* Ki/Kd 沿用 5 ms 离散增益，具体换算见 Car_PID.h。 */
-#define CAR_DEFAULT_KP         2.0f
-#define CAR_DEFAULT_KI         0.12f
-#define CAR_DEFAULT_KD         0.0f
+
+/* ---------- 电机与引脚 ---------- */
+#define CAR_MOTOR_NOLOAD_RPM    1000.0f    /* 电机输出轴空载转速 rpm，仅用于换算，不是指令限幅 */
+#define CAR_FLASH_CS            PB0        /* 板载 W25Q Flash 片选脚；复用 PA5/6/7 前需拉高释放 */
+#define CAR_LEFT_PWM            TIM8_CH1_PC6   /* 左轮 PWM 输出：TIM8 通道 1（PC6） */
+#define CAR_LEFT_DIR            PC7        /* 左轮方向控制脚 */
+#define CAR_RIGHT_PWM           TIM2_CH3_PA2   /* 右轮 PWM 输出：TIM2 通道 3（PA2） */
+#define CAR_RIGHT_DIR           PA5        /* 右轮方向控制脚 */
+#define CAR_LEFT_FORWARD_HIGH   1          /* 左轮方向脚电平与转向关系：1 = 高电平正转，0 = 低电平正转 */
+#define CAR_RIGHT_FORWARD_HIGH  1          /* 右轮方向脚电平与转向关系：1 = 高电平正转，0 = 低电平正转 */
+#define CAR_LEFT_ENCODER_INVERT 1          /* 左编码器计数取反：使正转时计数增大（1=取反，0=不取反） */
+#define CAR_RIGHT_ENCODER_INVERT 1         /* 右编码器计数取反：使正转时计数增大（1=取反，0=不取反） */
+
+/* ---------- 时序 ---------- */
+#define CAR_PWM_HZ              8000U      /* PWM 频率 8 kHz */
+#define CAR_PERIOD_MS           5U         /* 控制周期 5 ms（PIT 定时中断） */
+#define CAR_TELEMETRY_TICKS     20U        /* 每 20 个控制周期上报一次遥测（即 100 ms） */
+
+/* ---------- 编码器与限幅 ---------- */
+/* Initial bench assumption only. Verify counts per OUTPUT shaft revolution;
+ * JGB37-520 model and 1000rpm alone do not establish PPR or gear ratio. */
+#define CAR_ENCODER_CPR         (11.0f * 4.0f * 10.0f)  /* 编码器每转计数：11 线 × 4 倍频 × 10 减速比 = 440 */
+#define CAR_RPM_LIMIT           180.0f     /* 目标转速限幅 rpm（速度指令绝对值上限） */
+#define CAR_PWM_LIMIT           3500.0f    /* PID 输出 / PWM 占空比限幅（PWM 计数值上限）；NEUQ 库 PWM_MAX=10000 对应 100%，3500 即最大 35% 占空比 */
+#define CAR_ACCEL_LIMIT_RPM_S   200.0f     /* 参考轨迹加速度上限 rpm/s */
+#define CAR_JERK_LIMIT_RPM_S2   800.0f     /* 参考轨迹加加速度（jerk）上限 rpm/s² */
+#define CAR_MIN_CONTROL_US      1000U      /* 控制周期允许的最小间隔 1 ms，越界判定时故障 */
+#define CAR_MAX_CONTROL_US      15000U     /* 控制周期允许的最大间隔 15 ms，越界判定时故障 */
+#define CAR_SPEED_FILTER_TAU_S  0.005f     /* 速度一阶低通滤波时间常数 5 ms；值越大越平滑，但反馈延迟越大 */
+
+/* ---------- 前馈与 PID ---------- */
+/* PWM-count feedforward coefficients require identification on this chassis. */
+#define CAR_FF_KS               0.0f       /* 前馈静态项（克服静摩擦，PWM 计数）；0 = 关闭 */
+#define CAR_FF_KV               0.0f       /* 前馈速度项系数（PWM 计数/rpm）；0 = 关闭 */
+#define CAR_FF_KA               0.0f       /* 前馈加速度项系数（PWM 计数/(rpm/s)）；0 = 关闭 */
+#define CAR_PID_D_TAU_S         0.020f     /* 微分项低通滤波时间常数 20 ms，抑制噪声放大 */
+#define CAR_PID_SETPOINT_WEIGHT 1.0f       /* P 项设定值权重 beta：1 = 常规 PID，0 = 设定值不计入 P */
+#define CAR_DEFAULT_KP          2.0f       /* 默认比例增益 */
+#define CAR_DEFAULT_KI          0.12f      /* 默认积分增益（沿用 5 ms 离散单位，具体换算见 Car_PID.h） */
+#define CAR_DEFAULT_KD          0.0f       /* 默认微分增益（沿用 5 ms 离散单位，具体换算见 Car_PID.h） */
+
+/* ---------- 超时与故障检测 ---------- */
+#define CAR_LINK_TIMEOUT_MS     500U       /* 遥控链路超时：运行中 500 ms 未收到有效指令则判失联故障 */
+#define CAR_FRAME_TIMEOUT_MS    100U       /* 半帧接收超时：100 ms 内帧未收完则丢弃该帧 */
+#define CAR_STALL_TIMEOUT_MS    1500U      /* 堵转判定：输出饱和但转速过低持续 1.5 s 则判堵转故障 */
+#define CAR_DIRECTION_TIMEOUT_MS 1000U     /* 方向异常：目标与转速、输出与转速均反向持续 1 s 则判故障 */
 #endif
