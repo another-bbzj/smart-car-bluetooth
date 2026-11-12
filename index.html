@@ -1,0 +1,1328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>蓝牙差速车调试台</title>
+<style>
+
+:root{
+  color-scheme:light;
+  --bg:#f4f6f9;--panel:#fff;--panel2:#f8fafc;--line:#e2e7ee;
+  --text:#19283d;--muted:#69788e;--accent:#2563eb;--accent-ink:#fff;
+  --good:#16815e;--warn:#a66a12;--bad:#d6424c;
+  --left:#2878df;--right:#dc861b;--chart-grid:#e8edf3;--chart-text:#78879b;
+  --mono:"Cascadia Mono",Consolas,monospace;
+  --sans:"Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);padding:24px 32px;max-width:1600px;margin:0 auto}
+h1,h2,h3,p{margin:0}
+h1{font-size:18px;letter-spacing:.02em;font-weight:650}
+h2{font-size:15px;font-weight:650;display:flex;align-items:center;gap:10px}
+h2 small{margin-left:auto;font-size:10px;font-weight:400;color:var(--muted)}
+small{font-weight:400;color:var(--muted)}
+button,input,select{font-family:inherit}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #94bbff;outline-offset:3px}
+.topbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:20px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px 22px;box-shadow:0 3px 12px #253c5c04}
+.brand{display:flex;gap:12px;align-items:center}
+.brand-mark{width:40px;height:40px;display:grid;place-items:center;border-radius:12px;background:var(--accent);color:#fff;font:700 17px var(--mono)}
+.brand p{font-size:11px;color:var(--muted);margin-top:5px;letter-spacing:.07em}
+.conn{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.port{font:11px var(--mono);color:var(--muted);padding:8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{font-size:12px;font-weight:500;padding:9px 13px;min-height:36px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--text);cursor:pointer;transition:background .15s,border-color .15s}
+.btn:hover:not(:disabled){background:#f0f5ff;border-color:#b9cefa;color:var(--accent)}
+.btn:disabled{opacity:.42;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 3px 8px #2563eb14}
+.btn.primary:hover:not(:disabled){background:#1e54cc;color:#fff}
+.btn.danger{color:var(--bad);border-color:#f2c9cd;background:#fff5f5}
+.btn.danger:hover:not(:disabled){background:#ffe8ea;border-color:var(--bad);color:var(--bad)}
+.btn.big{padding:12px;font-size:13px;min-height:44px}
+.btn.small{padding:5px 10px;min-height:28px;font-size:11px}
+select.baud{font:12px var(--mono);padding:8px 6px}
+.intro{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:26px 4px 22px}
+.intro h2{font-size:25px;letter-spacing:-.03em;font-weight:650}
+.intro p{font-size:12px;color:var(--muted);margin-top:8px}
+.steps{display:flex;gap:18px;font-size:11px;color:var(--muted)}
+.steps b{font:11px var(--mono);color:var(--accent);margin-right:6px}
+main{display:grid;grid-template-columns:350px minmax(0,1fr);gap:20px;align-items:start}
+.left-col,.right-col{display:flex;flex-direction:column;gap:20px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:20px;box-shadow:0 3px 12px #253c5c03;min-width:0}
+.section-index{font:11px var(--mono);color:#9aa7b8;font-weight:400}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;padding:6px 10px;border-radius:6px;color:var(--muted);background:#f2f5f8;white-space:nowrap}
+.pill:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.7}
+.pill.run{color:var(--good);background:#eaf7f0}
+.pill.fault{color:var(--bad);background:#fff0f1}
+.pill.on{color:var(--accent);background:#edf3ff}
+.state-row{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted);padding-bottom:16px;border-bottom:1px solid var(--line)}
+.speed-row{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted)}
+.speed-row input[type=range]{flex:1;min-width:0;accent-color:var(--accent)}
+.speed-row input[type=number]{width:65px;font:600 15px var(--mono);text-align:center;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 3px}
+.dpad{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(2,62px);gap:8px;padding:12px 22px;background:var(--panel2);border:1px solid #edf0f4;border-radius:12px}
+.dpad .key{grid-row:2}
+.dpad .key[data-key=w]{grid-row:1;grid-column:2}
+.dpad .key[data-key=a]{grid-column:1}
+.dpad .key[data-key=s]{grid-column:2}
+.dpad .key[data-key=d]{grid-column:3}
+.key{border:1px solid #dce3ec;border-bottom-width:3px;border-radius:9px;background:#fff;color:var(--text);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font:600 17px var(--mono);touch-action:none;user-select:none}
+.key span{font:10px var(--sans);color:var(--muted)}
+.key:hover{border-color:#aac6f7}
+.key.active{background:var(--accent);border-color:#1d54cb;color:#fff}
+.key.active span{color:#fff}
+.key.disabled{opacity:.5}
+.actions{display:flex;flex-direction:column;gap:9px}
+.safe{display:flex;align-items:flex-start;gap:8px;font-size:11px;color:var(--muted);line-height:1.7;cursor:pointer}
+.safe input{margin:3px 0 0;accent-color:var(--accent)}
+.hint{font-size:10px;color:var(--muted);line-height:1.8}
+.wheel-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.wheel{background:#f7faff;border:1px solid #e6eef9;border-radius:10px;padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:8px 20px}
+.wheel.right{background:#fffcf6;border-color:#f4eddf}
+.wheel h3{font-size:11px;font-weight:500;color:var(--muted);grid-column:1/-1}
+.wheel .big{display:flex;align-items:baseline;gap:8px;grid-column:1/-1;margin:4px 0 9px}
+.wheel .big span{font:600 36px var(--mono);line-height:1;letter-spacing:-.04em}
+.wheel .big small{font-size:10px}
+.wheel.left .big span{color:var(--left)}
+.wheel.right .big span{color:var(--right)}
+.kv{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}
+.kv b{font:500 12px var(--mono);color:var(--text)}
+.kv-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;padding:2px 0}
+.kv-grid>div{display:flex;flex-direction:column;gap:8px;font-size:10px;color:var(--muted);padding-left:12px;border-left:1px solid var(--line);min-width:0}
+.kv-grid>div:first-child{border-left:0;padding-left:0}
+.kv-grid b{font:500 12px var(--mono);color:var(--text);overflow-wrap:anywhere}
+.bad{color:var(--bad)!important}
+table.pid{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px}
+table.pid th{color:var(--muted);font-weight:400;text-align:left;padding:0 3px 10px}
+table.pid th:first-child{width:25px}
+table.pid th:last-child{width:47px}
+table.pid td{padding:4px 3px}
+table.pid input{width:100%;min-width:0;font:12px var(--mono);text-align:center;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:6px;padding:8px 1px;appearance:textfield}
+table.pid input::-webkit-inner-spin-button{appearance:none}
+table.pid input:disabled{opacity:.5}
+table.pid .btn{padding:5px 7px}
+.actual{font:10px/1.8 var(--mono);color:var(--muted);padding:12px;background:var(--panel2);border-radius:8px}
+.chart-head,.log-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px}
+.chart-head p{font-size:11px;color:var(--muted);margin-top:7px}
+.chart-controls{display:flex;flex-direction:column;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px}
+.curve-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.curve-presets{display:flex;gap:4px;padding:3px;background:#f0f3f8;border-radius:8px}
+.curve-presets .btn{background:transparent;border:0;color:var(--muted);min-height:27px;padding:4px 10px}
+.curve-presets .btn[aria-pressed=true]{background:white;color:var(--accent);box-shadow:0 1px 4px #20365712}
+#curveCount{font:11px var(--mono);color:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:8px}
+.curve-option{display:flex;align-items:center;gap:7px;font-size:11px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;cursor:pointer;background:white;transition:background .15s}
+.curve-option:has(input:checked){background:#f8fafd;border-color:#ccd9eb}
+.curve-option:has(input:not(:checked)){color:#8793a3;background:#fafbfc}
+.curve-option input{margin:0;width:13px;height:13px;accent-color:var(--accent);cursor:pointer}
+.curve-option i{display:block;width:16px;height:0;border-top:2px solid var(--left)}
+.curve-option i.ref{border-top-style:dashed}
+.curve-option i.right-line{border-top-color:var(--right)}
+.plot-heading{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:9px}
+.plot-heading b{font-weight:500;color:var(--text)}
+.plot-heading span{font:10px var(--mono);color:#93a0b2}
+canvas{width:100%;display:block;background:#fbfcfe;border:1px solid #edf0f5;border-radius:9px}
+#speedChart{height:236px}
+#pwmChart{height:132px}
+.log-head label{font-size:11px;color:var(--muted);display:flex;gap:6px;align-items:center;cursor:pointer}
+.log{height:100px;overflow:auto;background:var(--panel2);border:1px solid #edf0f4;border-radius:8px;padding:12px;font:11px/1.8 var(--mono)}
+.log .line{white-space:pre-wrap;word-break:break-all}
+.log .info{color:var(--muted)}
+.log .ok{color:var(--good)}
+.log .warn{color:var(--warn)}
+.log .error{color:var(--bad)}
+.log .tx{color:var(--accent)}
+footer{margin:22px 4px 6px;font-size:11px;color:var(--muted);line-height:1.9}
+footer summary{cursor:pointer;font-weight:600;color:#4d607a;padding:6px 0}
+footer details>div{padding:12px 0}
+footer code{font:11px var(--mono);background:#eaf0f6;border-radius:4px;padding:2px 5px}
+#unsupported{display:none;background:#fff4f4;border:1px solid #f3cdd0;border-radius:10px;padding:14px;margin-top:18px;font-size:12px;line-height:1.8}
+#unsupported.show{display:block}
+#unsupported b{color:var(--bad)}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#101720;--panel:#182230;--panel2:#1d2939;--line:#304056;
+  --text:#e3ebf7;--muted:#a0aec2;--accent:#83adff;
+  --good:#67d5a7;--warn:#f1bd6d;--bad:#ff8793;
+  --left:#6aafff;--right:#f2b35e;--chart-grid:#29364a;--chart-text:#a0aec2;
+}
+:root[data-theme="dark"] .btn,:root[data-theme="dark"] .key{background:var(--panel2);border-color:var(--line)}
+:root[data-theme="dark"] .btn:hover:not(:disabled){background:#293b56;border-color:#5477a7;color:var(--accent)}
+:root[data-theme="dark"] .btn.primary,:root[data-theme="dark"] .key.active,:root[data-theme="dark"] .brand-mark{background:#3267d3;border-color:#3267d3;color:#fff}
+:root[data-theme="dark"] .btn.primary:hover:not(:disabled){background:#4078e7;color:#fff}
+:root[data-theme="dark"] .btn.danger{background:#35232f;border-color:#70404d;color:var(--bad)}
+:root[data-theme="dark"] .btn.danger:hover:not(:disabled){background:#4b2a38;border-color:var(--bad)}
+:root[data-theme="dark"] .pill{background:#263347}
+:root[data-theme="dark"] .pill.run{background:#183c32}
+:root[data-theme="dark"] .pill.fault{background:#422733}
+:root[data-theme="dark"] .pill.on{background:#263c60}
+:root[data-theme="dark"] .dpad,:root[data-theme="dark"] .log{border-color:var(--line)}
+:root[data-theme="dark"] .wheel{background:#1b2c43;border-color:#2d4463}
+:root[data-theme="dark"] .wheel.right{background:#302b25;border-color:#4d4030}
+:root[data-theme="dark"] .curve-presets{background:#111b29}
+:root[data-theme="dark"] .curve-presets .btn{background:transparent}
+:root[data-theme="dark"] .curve-presets .btn[aria-pressed=true]{background:#2c3f5c;color:var(--accent)}
+:root[data-theme="dark"] .curve-option{background:var(--panel2)}
+:root[data-theme="dark"] .curve-option:has(input:checked){background:#25354c;border-color:#4a6182}
+:root[data-theme="dark"] .curve-option:has(input:not(:checked)){background:#17212f;color:var(--muted)}
+:root[data-theme="dark"] canvas{background:#131e2d;border-color:var(--line)}
+:root[data-theme="dark"] footer summary{color:var(--text)}
+:root[data-theme="dark"] footer code{background:var(--panel2)}
+:root[data-theme="dark"] #unsupported{background:#35232f;border-color:#70404d}
+#btnTheme{min-width:100px}
+@media(min-width:1250px){.left-col{position:sticky;top:20px}}
+@media(max-width:1150px){body{padding:20px}main{grid-template-columns:320px minmax(0,1fr);gap:16px}.card{padding:18px}.kv-grid{grid-template-columns:repeat(3,1fr)}.wheel{padding:15px;column-gap:10px}.wheel .big span{font-size:30px}.steps{display:none}}
+@media(max-width:820px){body{padding:14px}.topbar{padding:16px}.conn{width:100%}.port{padding-left:0}.intro{margin:22px 2px 18px}.intro h2{font-size:22px}main{grid-template-columns:minmax(0,1fr)}.left-col{display:grid;grid-template-columns:1fr 1fr;align-items:start;gap:16px}.card{gap:16px}.wheel .big span{font-size:34px}}
+@media(max-width:580px){body{padding:10px}.topbar{border-radius:12px;gap:14px}.left-col{display:flex;align-items:stretch}.conn{gap:6px}.conn .port{width:100%;max-width:none}.intro p{font-size:11px;line-height:1.8}.card{padding:18px}.wheel-grid{gap:10px}.wheel{padding:13px;grid-template-columns:1fr;gap:8px}.wheel .big{flex-wrap:wrap;margin:3px 0 8px;gap:5px}.wheel .big span{font-size:30px}.kv-grid{gap:14px 8px}.curve-option{padding:8px}.curve-presets .btn{padding:5px 9px}.curve-toolbar{gap:12px}#speedChart{height:215px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">C</span>
+    <div><h1>蓝牙差速车调试台</h1><p>CAR LAB / 调试工作台</p></div>
+  </div>
+  <div class="conn">
+    <span class="port" id="portLabel">未选择串口</span>
+    <select class="btn baud" id="baudSel" title="波特率，必须与蓝牙模块和固件一致">
+      <option value="9600" selected>9600</option>
+      <option value="115200">115200</option>
+    </select>
+    <button class="btn" id="btnChoose">选择串口</button>
+    <button class="btn primary" id="btnConnect">连接</button>
+    <button class="btn" id="btnDisconnect" disabled>断开</button>
+    <span class="pill off" id="pill">未连接</span>
+    <button class="btn" id="btnTheme" type="button" aria-label="深色模式" aria-pressed="false">☾ 深色模式</button>
+  </div>
+</div>
+
+<div id="unsupported">
+  <b>当前环境不可用 Web Serial。</b>请用桌面版 Chrome 或 Edge（117+，支持蓝牙 SPP）打开本页，并通过 <code>car_console.bat</code> 以
+  <code>http://localhost</code> 访问；Firefox / Safari 不支持串口。也可以用 <code>python Tools/car_host.py</code> 作为替代。
+</div>
+
+<div class="intro">
+  <div><h2>连接、控制与观测</h2><p>从轮速到控制输出，让底盘状态一目了然。</p></div>
+  <div class="steps"><span><b>01</b>连接串口</span><span><b>02</b>确认安全</span><span><b>03</b>使能调试</span></div>
+</div>
+<main>
+  <div class="left-col">
+    <section class="card">
+      <h2><span class="section-index">01</span>驾驶控制<small>按住方向键移动</small></h2>
+      <div class="state-row">
+        <span class="pill off" id="statePill">等待回传</span>
+        <span id="faultText">故障：--</span>
+      </div>
+      <div class="speed-row">
+        <label for="rpmRange">速度</label>
+        <input type="range" id="rpmRange" min="20" max="180" step="5" value="60">
+        <input type="number" id="rpmInput" min="20" max="180" step="5" value="60">
+        <span>rpm</span>
+      </div>
+      <div class="dpad">
+        <button class="key" data-key="w">W<span>前进</span></button>
+        <button class="key" data-key="a">A<span>左转</span></button>
+        <button class="key" data-key="s">S<span>后退</span></button>
+        <button class="key" data-key="d">D<span>右转</span></button>
+      </div>
+      <div class="actions">
+        <button class="btn primary big" id="btnArm" disabled>使能（从零开始）</button>
+        <button class="btn danger big" id="btnStop">停止 / 清故障 [空格]</button>
+      </div>
+      <label class="safe"><input type="checkbox" id="safeCheck">
+        已确认车轮架空或场地安全（首次使能前必须勾选）</label>
+      <p class="hint">松开方向键：双轮零速并制动。<br>窗口失焦 / 切到后台：自动停止并取消使能。</p>
+    </section>
+
+    <section class="card">
+      <h2><span class="section-index">02</span>PID 调参 <small>停止时可写 · RAM</small></h2>
+      <table class="pid">
+        <thead><tr><th>轮</th><th>Kp</th><th>Ki</th><th>Kd</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td>左</td>
+            <td><input type="number" id="kp0" min="0" max="655.35" step="0.01" value="2"></td>
+            <td><input type="number" id="ki0" min="0" max="655.35" step="0.01" value="0.12"></td>
+            <td><input type="number" id="kd0" min="0" max="655.35" step="0.01" value="0"></td>
+            <td><button class="btn small" data-pid="0">写入</button></td>
+          </tr>
+          <tr>
+            <td>右</td>
+            <td><input type="number" id="kp1" min="0" max="655.35" step="0.01" value="2"></td>
+            <td><input type="number" id="ki1" min="0" max="655.35" step="0.01" value="0.12"></td>
+            <td><input type="number" id="kd1" min="0" max="655.35" step="0.01" value="0"></td>
+            <td><button class="btn small" data-pid="1">写入</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="actual" id="actualPid">实际 PID：等待回传</div>
+    </section>
+  </div>
+
+  <div class="right-col">
+    <section class="card">
+      <h2><span class="section-index">03</span>实时状态<small>车端遥测</small></h2>
+      <div class="wheel-grid">
+        <div class="wheel left">
+          <h3>LEFT / 左轮</h3>
+          <div class="big"><span id="lRpm">0.0</span><small>rpm 实测</small></div>
+          <div class="kv"><span>目标</span><b id="lRef">0.0</b></div>
+          <div class="kv"><span>PWM</span><b id="lPwm">0.0%</b></div>
+        </div>
+        <div class="wheel right">
+          <h3>RIGHT / 右轮</h3>
+          <div class="big"><span id="rRpm">0.0</span><small>rpm 实测</small></div>
+          <div class="kv"><span>目标</span><b id="rRef">0.0</b></div>
+          <div class="kv"><span>PWM</span><b id="rPwm">0.0%</b></div>
+        </div>
+      </div>
+      <div class="kv-grid">
+        <div><span>状态</span><b id="stateVal">--</b></div>
+        <div><span>故障</span><b id="faultVal">--</b></div>
+        <div><span>命令结果</span><b id="resultVal">--</b></div>
+        <div><span>有效帧</span><b id="framesVal">--</b></div>
+        <div><span>接收字节</span><b id="rxVal">0</b></div>
+        <div><span>回传年龄</span><b id="ageVal">--</b></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="chart-head">
+        <div><h2><span class="section-index">04</span>实时曲线</h2><p>勾选需要观察的通道，聚焦每一次变化。</p></div>
+        <button class="btn" id="btnCsv">↓ 导出 CSV</button>
+      </div>
+      <div class="chart-controls">
+        <div class="curve-toolbar">
+          <div class="curve-presets" role="group" aria-label="曲线显示预设">
+            <button class="btn small" data-curves="all" aria-pressed="true">全部</button>
+            <button class="btn small" data-curves="speed" aria-pressed="false">仅轮速</button>
+            <button class="btn small" data-curves="pwm" aria-pressed="false">仅 PWM</button>
+            <button class="btn small" data-curves="none" aria-pressed="false">清空</button>
+          </div>
+          <span id="curveCount" aria-live="polite">6 / 6 条曲线</span>
+        </div>
+        <div class="legend" role="group" aria-label="选择显示曲线">
+          <label class="curve-option"><input type="checkbox" data-curve="lRef" checked><i class="ref"></i>左目标</label>
+          <label class="curve-option"><input type="checkbox" data-curve="lRpm" checked><i></i>左实测</label>
+          <label class="curve-option"><input type="checkbox" data-curve="rRef" checked><i class="ref right-line"></i>右目标</label>
+          <label class="curve-option"><input type="checkbox" data-curve="rRpm" checked><i class="right-line"></i>右实测</label>
+          <label class="curve-option"><input type="checkbox" data-curve="lPwm" checked><i></i>左 PWM</label>
+          <label class="curve-option"><input type="checkbox" data-curve="rPwm" checked><i class="right-line"></i>右 PWM</label>
+        </div>
+      </div>
+      <div><div class="plot-heading"><b>轮速 <small> / rpm</small></b><span>最近 10 秒 · 自动量程</span></div>
+        <canvas id="speedChart" role="img" aria-label="左右轮目标和实测轮速曲线"></canvas></div>
+      <div><div class="plot-heading"><b>控制输出 <small> / PWM %</small></b><span>实线：实测或输出 · 虚线：目标</span></div>
+        <canvas id="pwmChart" role="img" aria-label="左右轮 PWM 输出曲线"></canvas></div>
+      <p class="hint">显示选择仅影响曲线；采集和 CSV 始终保留全部通道。</p>
+    </section>
+
+    <section class="card">
+      <div class="log-head">
+        <h2><span class="section-index">05</span>连接与操作日志</h2>
+        <label><input type="checkbox" id="showTx"> 显示发送帧</label>
+      </div>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+<details><summary>连接指南与调试说明</summary><div>
+  首次使用：Windows 配对 <code>JDY-31-SPP</code>（PIN 1234）→ 点「选择串口」→「连接」→ 等停止回传 → 勾选安全确认 →「使能」。<br>
+  蓝牙 SPP 需要桌面版 <b>Chrome / Edge 117+</b>；更早的浏览器或手机浏览器不会列出蓝牙串口。Win11 若配对后没有出现 COM 口，请到「更多蓝牙选项 → COM 端口」手动添加，或改用旧版「设备和打印机 → 添加设备」完成配对。<br>
+  同一 COM 口不能被其他程序（串口助手、car_host.py）同时占用。固件默认 9600，若模块改成 115200 需同步改 <code>CAR_UART_BAUD</code>。<br>
+  结束调试时先停止、核对停止回传，再断开串口。关闭 BAT 服务窗口不会自动关闭已打开网页的蓝牙连接。CSV 请在下次连接前导出。
+</div></details>
+</footer>
+
+<script>
+'use strict';
+
+/* ============================================================
+   协议常量（与 CODE/Car_Core.c 保持一致）
+   ============================================================ */
+const CMD_ARM = 1, CMD_STOP = 2, CMD_WHEELS = 3, CMD_PID = 4, CMD_HEARTBEAT = 5;
+const RPM_MIN = 20, RPM_MAX = 180, RPM_LIMIT = 180;
+const BAUD = 9600;
+const TELEMETRY_TAIL = [0x00, 0x00, 0x80, 0x7f];
+const RX_STALE_MS = 350;
+const TX_PERIOD_MS = 100;
+const STOP_RETRY_MS = 150;
+const WRITE_TIMEOUT_MS = 300;
+const WINDOW_MS = 10000;
+
+const STATES = ['停止', '运行', '故障'];
+const FAULTS = {0:'正常', 1:'通信超时', 2:'堵转/编码器无反馈', 3:'反馈方向异常',
+                4:'串口错误/溢出', 5:'控制周期异常', 6:'控制器参数/数值异常'};
+const RESULTS = {0:'成功', 1:'状态不允许', 2:'参数无效', 3:'帧无效'};
+
+const $ = id => document.getElementById(id);
+
+/* ============================================================
+   协议编解码
+   ============================================================ */
+function crc8(bytes) {
+  let crc = 0;
+  for (const b of bytes) {
+    crc ^= b;
+    for (let i = 0; i < 8; i++) {
+      crc = (crc & 0x80) ? (((crc << 1) ^ 0x07) & 0xff) : ((crc << 1) & 0xff);
+    }
+  }
+  return crc & 0xff;
+}
+
+function frame(cmd, data = []) {
+  const body = [cmd, data.length, ...data];
+  return new Uint8Array([0xc3, 0x3c, ...body, crc8(body)]);
+}
+
+function wheelsFrame(left, right) {
+  left = Math.max(-RPM_LIMIT, Math.min(RPM_LIMIT, Math.round(left)));
+  right = Math.max(-RPM_LIMIT, Math.min(RPM_LIMIT, Math.round(right)));
+  return frame(CMD_WHEELS, [
+    (left >> 8) & 0xff, left & 0xff,
+    (right >> 8) & 0xff, right & 0xff
+  ]);
+}
+
+function pidFrame(wheel, kp, ki, kd) {
+  const vals = [kp, ki, kd].map(x => Math.round(x * 100));
+  if (vals.some(v => !Number.isFinite(v) || v < 0 || v > 65535)) {
+    throw new Error('PID 必须在 0~655.35 之间');
+  }
+  return frame(CMD_PID, [
+    wheel,
+    (vals[0] >> 8) & 0xff, vals[0] & 0xff,
+    (vals[1] >> 8) & 0xff, vals[1] & 0xff,
+    (vals[2] >> 8) & 0xff, vals[2] & 0xff
+  ]);
+}
+
+function hex(bytes) {
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+}
+
+/* ============================================================
+   状态
+   ============================================================ */
+const app = {
+  port: null,
+  reader: null,
+  writer: null,
+  readLoopPromise: null,
+  connected: false,
+  connecting: false,
+  choosing: false,
+  disconnecting: false,
+  armEpoch: 0,
+  txQueue: [],
+  txBusy: false,
+  armed: false,
+  pendingArm: false,
+  armSentAt: 0,
+  stopRetries: 0,
+  stopTimer: 0,
+  lastRx: 0,
+  lastSample: null,
+  keys: new Set(),
+  rpm: 60,
+  rxBytes: 0,
+  txCount: 0,
+  series: [],
+  rows: [],
+  connectAt: 0,
+  linkWarned: false,
+  noTelemetryWarned: false
+};
+
+let rxBuf = new Uint8Array(0);
+
+/* ============================================================
+   DOM
+   ============================================================ */
+const btnChoose = $('btnChoose'), btnConnect = $('btnConnect'), btnDisconnect = $('btnDisconnect');
+const baudSel = $('baudSel');
+const btnArm = $('btnArm'), btnStop = $('btnStop'), safeCheck = $('safeCheck');
+const portLabel = $('portLabel'), pill = $('pill');
+const rpmRange = $('rpmRange'), rpmInput = $('rpmInput');
+const statePill = $('statePill'), faultText = $('faultText');
+const lRpm = $('lRpm'), lRef = $('lRef'), lPwm = $('lPwm');
+const rRpm = $('rRpm'), rRef = $('rRef'), rPwm = $('rPwm');
+const stateVal = $('stateVal'), faultVal = $('faultVal'), resultVal = $('resultVal');
+const framesVal = $('framesVal'), rxVal = $('rxVal'), ageVal = $('ageVal');
+const actualPid = $('actualPid');
+const logEl = $('log'), showTx = $('showTx'), btnCsv = $('btnCsv');
+const speedChart = $('speedChart'), pwmChart = $('pwmChart');
+
+if (!('serial' in navigator) || window.isSecureContext === false) $('unsupported').classList.add('show');
+
+/* ============================================================
+   日志
+   ============================================================ */
+function log(msg, kind = 'info') {
+  const line = document.createElement('div');
+  line.className = 'line ' + kind;
+  const t = new Date().toLocaleTimeString('zh-CN', {hour12: false});
+  line.textContent = `[${t}] ${msg}`;
+  logEl.appendChild(line);
+  while (logEl.children.length > 120) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ============================================================
+   发送
+   ============================================================ */
+function deadline(promise, ms = WRITE_TIMEOUT_MS) {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('串口操作超时')), ms);
+  })]).finally(() => clearTimeout(timer));
+}
+
+function discardQueued() {
+  for (const item of app.txQueue.splice(0)) item.resolve(false);
+}
+
+function send(bytes) {
+  if (!app.writer || !app.connected || app.disconnecting) return Promise.resolve(false);
+  if (bytes[2] === CMD_STOP) discardQueued();
+  if (bytes[2] === CMD_WHEELS) {
+    app.txQueue = app.txQueue.filter(item => {
+      if (item.bytes[2] !== CMD_WHEELS) return true;
+      item.resolve(false);
+      return false;
+    });
+  }
+  // Bound non-motion traffic too (e.g. repeated PID clicks).
+  if (app.txQueue.length >= 8) return Promise.resolve(false);
+  return new Promise(resolve => {
+    app.txQueue.push({bytes, resolve});
+    pumpTx();
+  });
+}
+
+async function pumpTx() {
+  if (app.txBusy || !app.connected || app.disconnecting) return;
+  const item = app.txQueue.shift();
+  if (!item) return;
+  const writer = app.writer;
+  app.txBusy = true;
+  try {
+    await deadline(writer.write(item.bytes));
+    app.txCount++;
+    if (showTx.checked) log('TX ' + hex(item.bytes), 'tx');
+    item.resolve(app.connected && !app.disconnecting && writer === app.writer);
+  } catch (err) {
+    item.resolve(false);
+    log('发送失败：' + err.message, 'error');
+    void disconnect(false);
+  } finally {
+    app.txBusy = false;
+    pumpTx();
+  }
+}
+
+/* ============================================================
+   连接 / 断开
+   ============================================================ */
+async function choosePort() {
+  if (app.connected || app.disconnecting || app.choosing) return false;
+  if (!('serial' in navigator)) { log('浏览器不支持 Web Serial', 'error'); return false; }
+  app.choosing = true;
+  updateButtons();
+  try {
+    app.port = await navigator.serial.requestPort();
+    portLabel.textContent = portInfo();
+    log('已选择串口', 'ok');
+    updateButtons();
+    return true;
+  } catch (err) {
+    if (err.name !== 'NotFoundError') log('选择串口失败：' + err.message, 'error');
+    return false;
+  } finally {
+    app.choosing = false;
+    updateButtons();
+  }
+}
+
+function portInfo() {
+  try {
+    const info = app.port.getInfo();
+    if (info.usbVendorId) {
+      return `USB ${info.usbVendorId.toString(16).padStart(4, '0')}:` +
+             `${(info.usbProductId || 0).toString(16).padStart(4, '0')}`;
+    }
+  } catch (_) {}
+  return '串口已选择（蓝牙 / 系统串口）';
+}
+
+async function connect() {
+  if (app.connected || app.connecting || app.disconnecting || app.choosing) return;
+  if (!('serial' in navigator)) { log('浏览器不支持 Web Serial', 'error'); return; }
+  // 先占住 connecting 再等待用户选口，否则连点两次会同时走到 port.open，
+  // 第二次失败后会把第一次刚打开的端口关掉。
+  app.connecting = true;
+  updateButtons();
+  try {
+    if (!app.port && !(await choosePort())) return;
+    const baud = Number(baudSel.value);
+    if (!Number.isFinite(baud) || baud <= 0) { log('波特率无效', 'error'); return; }
+    await app.port.open({
+      baudRate: baud, dataBits: 8, stopBits: 1,
+      parity: 'none', flowControl: 'none'
+    });
+    app.writer = app.port.writable.getWriter();
+    app.connected = true;
+    app.lastRx = 0;
+    app.lastSample = null;
+    app.linkWarned = false;
+    app.noTelemetryWarned = false;
+    app.connectAt = performance.now();
+    rxBuf = new Uint8Array(0);
+    app.rxBytes = 0;
+    app.txCount = 0;
+    app.series = [];
+    app.rows = [];
+    resetTelemetryUi();
+    pill.textContent = '已连接';
+    pill.className = 'pill on';
+    portLabel.textContent = portInfo();
+    log(`已连接，${baud} 8N1，正在发送 STOP`, 'ok');
+    updateButtons();
+    app.readLoopPromise = readLoop().catch(err => {
+      if (app.connected) {
+        log('接收循环异常：' + err.message, 'error');
+        disconnect(false);
+      }
+    });
+    stop();
+  } catch (err) {
+    log('连接失败：' + err.message + '（检查 COM 口是否被占用）', 'error');
+    try { if (app.writer) app.writer.releaseLock(); } catch (_) {}
+    app.writer = null;
+    app.connected = false;
+    try { if (app.port && app.port.readable) await app.port.close(); } catch (_) {}
+  } finally {
+    app.connecting = false;
+    updateButtons();
+  }
+}
+
+async function disconnect(sendStop = true) {
+  if (app.disconnecting) return;
+  app.disconnecting = true;
+  const wasConnected = app.connected;
+  const port = app.port, writer = app.writer;
+  app.connected = false;
+  app.armEpoch++;
+  app.armed = false;
+  app.pendingArm = false;
+  app.stopRetries = 0;
+  app.keys.clear();
+  clearTimeout(app.stopTimer);
+  discardQueued();
+  updateButtons();
+
+  if (sendStop && writer) {
+    try { await deadline(writer.write(frame(CMD_STOP))); } catch (_) {}
+  }
+  try { if (app.reader) await deadline(app.reader.cancel()); } catch (_) {}
+  try { if (app.readLoopPromise) await deadline(app.readLoopPromise); } catch (_) {}
+  app.readLoopPromise = null;
+  try { if (writer) await deadline(writer.abort()); } catch (_) {}
+  try { if (writer) writer.releaseLock(); } catch (_) {}
+  app.writer = null;
+  try { if (port) await deadline(port.close()); } catch (err) {
+    log('端口清理失败，请重新选择串口：' + err.message, 'warn');
+    app.port = null;
+    portLabel.textContent = '请重新选择串口';
+  }
+  app.reader = null;
+  app.disconnecting = false;
+
+  pill.textContent = '未连接';
+  pill.className = 'pill off';
+  app.lastSample = null;
+  app.lastRx = 0;
+  app.series = [];
+  resetTelemetryUi();
+  markCharts();
+  if (wasConnected) log('已断开，可用「导出 CSV」保存本次数据', 'info');
+  updateButtons();
+}
+
+async function readLoop() {
+  const port = app.port;
+  while (port.readable) {
+    const reader = port.readable.getReader();
+    app.reader = reader;
+    try {
+      while (app.connected) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        if (value && value.length) {
+          app.rxBytes += value.length;
+          feed(value);
+        }
+      }
+    } catch (err) {
+      if (app.connected) {
+        log('接收失败：' + err.message, 'error');
+        setTimeout(() => { if (app.connected) disconnect(false); }, 0);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+      app.reader = null;
+    }
+    break;
+  }
+  // EOF may not be accompanied by a navigator.serial disconnect event.
+  if (app.connected) {
+    log('串口接收已结束，正在断开', 'warn');
+    setTimeout(() => { if (app.connected && app.port === port) void disconnect(false); }, 0);
+  }
+}
+
+if ('serial' in navigator) {
+  navigator.serial.addEventListener('disconnect', event => {
+    if (event.target === app.port) {
+      log('串口已断开（设备或蓝牙链路丢失）', 'error');
+      if (app.connected) disconnect(false);
+    }
+  });
+}
+
+/* ============================================================
+   回传解析：16 × float32 小端 + 00 00 80 7F
+   ============================================================ */
+function findTail(buf) {
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0x80 && buf[i + 3] === 0x7f) return i;
+  }
+  return -1;
+}
+
+function feed(bytes) {
+  const merged = new Uint8Array(rxBuf.length + bytes.length);
+  merged.set(rxBuf);
+  merged.set(bytes, rxBuf.length);
+  rxBuf = merged;
+
+  while (true) {
+    const idx = findTail(rxBuf);
+    if (idx < 0) {
+      if (rxBuf.length > 67) rxBuf = rxBuf.slice(rxBuf.length - 67);
+      return;
+    }
+    if (idx >= 64) {
+      const chunk = rxBuf.slice(idx - 64, idx);
+      parseSample(chunk);
+    }
+    rxBuf = rxBuf.slice(idx + 4);
+  }
+}
+
+function parseSample(chunk) {
+  const dv = new DataView(chunk.buffer, chunk.byteOffset, 64);
+  const v = [];
+  for (let i = 0; i < 16; i++) v.push(dv.getFloat32(i * 4, true));
+  if (!v.every(Number.isFinite)) return;
+  const state = v[0];
+  if (state !== 0 && state !== 1 && state !== 2) return;
+  if (!Number.isInteger(v[1]) || !(v[1] in FAULTS) ||
+      !Number.isInteger(v[8]) || !(v[8] in RESULTS) ||
+      !Number.isInteger(v[9]) || v[9] < 0 ||
+      v.slice(10).some(gain => gain < 0 || gain > 655.36)) return;
+  onSample(v, state);
+}
+
+function onSample(v, state) {
+  const now = performance.now();
+  app.lastRx = now;
+  app.linkWarned = false;
+  app.lastSample = v;
+
+  if (state === 1 && app.pendingArm) {
+    app.armed = true;
+    app.pendingArm = false;
+    log('已进入运行状态，可以驾驶', 'ok');
+  }
+  if (state !== 1) {
+    app.armed = false;
+    app.keys.clear();
+    updateDriveButtons();
+    if (state === 2) app.pendingArm = false;
+  }
+
+  const fault = Math.round(v[1]);
+  const result = Math.round(v[8]);
+
+  stateVal.textContent = STATES[state] || String(state);
+  faultVal.textContent = FAULTS[fault] || ('故障 ' + fault);
+  resultVal.textContent = RESULTS[result] || String(result);
+  framesVal.textContent = Math.round(v[9]);
+  rxVal.textContent = app.rxBytes.toLocaleString('zh-CN');
+
+  statePill.textContent = STATES[state] || '未知';
+  statePill.className = 'pill ' + (state === 1 ? 'run' : state === 2 ? 'fault' : 'off');
+  faultText.textContent = '故障：' + (FAULTS[fault] || fault);
+  faultText.classList.toggle('bad', state === 2);
+
+  lRpm.textContent = v[3].toFixed(1);
+  lRef.textContent = v[2].toFixed(1);
+  lPwm.textContent = v[6].toFixed(1) + '%';
+  rRpm.textContent = v[5].toFixed(1);
+  rRef.textContent = v[4].toFixed(1);
+  rPwm.textContent = v[7].toFixed(1) + '%';
+
+  actualPid.textContent =
+    `实际 PID：左 ${v[10].toFixed(2)} / ${v[11].toFixed(2)} / ${v[12].toFixed(2)}　` +
+    `右 ${v[13].toFixed(2)} / ${v[14].toFixed(2)} / ${v[15].toFixed(2)}`;
+
+  app.series.push({t: now, lRef: v[2], lRpm: v[3], rRef: v[4], rRpm: v[5], lPwm: v[6], rPwm: v[7]});
+  if (app.series.length > 1200) app.series.splice(0, app.series.length - 1200);
+
+  const rel = (now - app.connectAt) / 1000;
+  app.rows.push([rel.toFixed(3), ...v.map(x => Number(x.toFixed(3)))]);
+  if (app.rows.length > 200000) app.rows.shift();
+
+  markCharts();
+  updateButtons();
+}
+
+/* ============================================================
+   按钮状态
+   ============================================================ */
+function updateButtons() {
+  const busy = app.connecting || app.disconnecting || app.choosing;
+  const supported = 'serial' in navigator && window.isSecureContext !== false;
+  btnConnect.disabled = !supported || app.connected || busy;
+  btnDisconnect.disabled = !app.connected || busy;
+  btnChoose.disabled = !supported || app.connected || busy;
+  baudSel.disabled = app.connected || busy;
+  const fresh = app.lastSample && (performance.now() - app.lastRx) < RX_STALE_MS;
+  const stopped = fresh && Math.round(app.lastSample[0]) === 0;
+  btnArm.disabled = !app.connected || busy || !stopped || app.armed || app.pendingArm ||
+                    app.stopRetries > 0 || !safeCheck.checked;
+
+  const canTune = app.connected && !busy && stopped && !app.armed && !app.pendingArm && !app.stopRetries;
+  for (const wheel of [0, 1]) {
+    for (const name of ['kp', 'ki', 'kd']) {
+      const input = $(`${name}${wheel}`);
+      if (input) input.disabled = !canTune;
+    }
+  }
+  document.querySelectorAll('[data-pid]').forEach(b => b.disabled = !canTune);
+  updateDriveButtons();
+}
+
+function updateDriveButtons() {
+  document.querySelectorAll('[data-key]').forEach(b => {
+    b.classList.toggle('disabled', !app.armed);
+    b.classList.toggle('active', app.keys.has(b.dataset.key));
+  });
+}
+
+function resetTelemetryUi() {
+  statePill.textContent = '等待回传';
+  statePill.className = 'pill off';
+  faultText.textContent = '故障：--';
+  faultText.classList.remove('bad');
+  stateVal.textContent = faultVal.textContent = resultVal.textContent = '--';
+  framesVal.textContent = ageVal.textContent = '--';
+  ageVal.classList.remove('bad');
+  lRpm.textContent = lRef.textContent = rRpm.textContent = rRef.textContent = '0.0';
+  lPwm.textContent = rPwm.textContent = '0.0%';
+  actualPid.textContent = '实际 PID：等待回传';
+  rxVal.textContent = '0';
+}
+
+/* ============================================================
+   驾驶
+   ============================================================ */
+function clampRpm(value) {
+  if (!Number.isFinite(value)) return 60;
+  return Math.max(RPM_MIN, Math.min(RPM_MAX, Math.round(value)));
+}
+
+function drive() {
+  if (!app.armed) return;
+  const rpm = clampRpm(app.rpm);
+  const forward = (app.keys.has('w') ? 1 : 0) - (app.keys.has('s') ? 1 : 0);
+  const turnLeft = (app.keys.has('a') ? 1 : 0) - (app.keys.has('d') ? 1 : 0);
+  const turn = turnLeft * (forward ? 0.6 : 1);
+  let left = forward - turn;
+  let right = forward + turn;
+  const scale = Math.max(1, Math.abs(left), Math.abs(right));
+  left = Math.round(left * rpm / scale);
+  right = Math.round(right * rpm / scale);
+  send(wheelsFrame(left, right));
+}
+
+function pressKey(key, pressed) {
+  if (pressed) {
+    if (!app.armed) {
+      if (app.connected && app.lastSample && Math.round(app.lastSample[0]) === 0) {
+        log('请先点击「使能」再驾驶', 'warn');
+      }
+      return;
+    }
+    app.keys.add(key);
+  } else {
+    app.keys.delete(key);
+  }
+  updateDriveButtons();
+  drive();
+}
+
+function setRpm(value) {
+  app.rpm = clampRpm(value);
+  rpmRange.value = app.rpm;
+  rpmInput.value = app.rpm;
+}
+
+/* ============================================================
+   使能 / 停止 / PID
+   ============================================================ */
+async function arm() {
+  if (!app.connected || app.disconnecting || app.connecting) { log('请先连接串口', 'warn'); return; }
+  if (app.armed || app.pendingArm) return;
+  if (app.stopRetries > 0) { log('正在重发 STOP，稍后再使能', 'warn'); return; }
+  const s = app.lastSample;
+  if (!s || (performance.now() - app.lastRx) > RX_STALE_MS || Math.round(s[0]) !== 0) {
+    log('请等待「停止」状态回传后再使能', 'warn');
+    return;
+  }
+  if (!safeCheck.checked) {
+    log('请先勾选「已确认车轮架空或场地安全」', 'warn');
+    safeCheck.focus();
+    return;
+  }
+  app.keys.clear();
+  const epoch = ++app.armEpoch;
+  app.pendingArm = true;
+  app.armSentAt = performance.now();
+  updateButtons();
+  const sent = await send(frame(CMD_ARM));
+  if (epoch !== app.armEpoch) return;
+  if (!sent) {
+    app.pendingArm = false;
+  } else if (app.pendingArm) {
+    log('ARM 已发送，等待运行状态回传', 'info');
+  }
+  updateButtons();
+}
+
+function stop() {
+  app.armEpoch++;
+  app.armed = false;
+  app.pendingArm = false;
+  app.keys.clear();
+  app.stopRetries = 0;
+  clearTimeout(app.stopTimer);
+  updateDriveButtons();
+  if (!app.connected) {
+    log('未连接，无法发送 STOP', 'warn');
+    updateButtons();
+    return;
+  }
+  app.stopRetries = 2;
+  send(frame(CMD_STOP));
+  const retry = () => {
+    if (app.stopRetries <= 0) return;
+    app.stopRetries--;
+    send(frame(CMD_STOP));
+    if (app.stopRetries > 0) app.stopTimer = setTimeout(retry, STOP_RETRY_MS);
+    updateButtons();
+  };
+  app.stopTimer = setTimeout(retry, STOP_RETRY_MS);
+  log('请求 STOP，含两次间隔重发；请核对停止回传', 'info');
+  updateButtons();
+}
+
+async function writePid(wheel) {
+  const s = app.lastSample;
+  if (!app.connected || !s || (performance.now() - app.lastRx) > RX_STALE_MS ||
+      Math.round(s[0]) !== 0 || app.armed || app.pendingArm || app.stopRetries || app.disconnecting) {
+    log('先停止并收到停止回传后再写 PID', 'warn');
+    return;
+  }
+  const read = id => {
+    const raw = $(id).value.trim();
+    return raw === '' ? NaN : Number(raw);
+  };
+  const kp = read(`kp${wheel}`), ki = read(`ki${wheel}`), kd = read(`kd${wheel}`);
+  const gains = [kp, ki, kd];
+  if (!gains.every(x => Number.isFinite(x) && x >= 0 && x <= 655.35)) {
+    log('PID 必须在 0~655.35 之间', 'warn');
+    return;
+  }
+  if (gains.some(x => Math.abs(x * 100 - Math.round(x * 100)) > 1e-6)) {
+    log('PID 最多两位小数', 'warn');
+    return;
+  }
+  try {
+    if (await send(pidFrame(wheel, kp, ki, kd))) {
+      log(`${wheel ? '右' : '左'}轮 PID 已发送：${kp} / ${ki} / ${kd}，请核对实际 PID 回传`, 'info');
+    } else {
+      log('PID 未发送成功，请检查连接后重试', 'error');
+    }
+  } catch (err) {
+    log(err.message, 'error');
+  }
+}
+
+/* ============================================================
+   曲线
+   ============================================================ */
+const CURVES = [
+  {key:'lRef', group:'speed', side:'left', dash:[5,4], width:1.5},
+  {key:'lRpm', group:'speed', side:'left', dash:[], width:2},
+  {key:'rRef', group:'speed', side:'right', dash:[5,4], width:1.5},
+  {key:'rRpm', group:'speed', side:'right', dash:[], width:2},
+  {key:'lPwm', group:'pwm', side:'left', dash:[], width:1.8},
+  {key:'rPwm', group:'pwm', side:'right', dash:[], width:1.8}
+];
+const visibleCurves = new Set(CURVES.map(curve => curve.key));
+
+function setCurveVisible(key, visible) {
+  if (!CURVES.some(curve => curve.key === key)) return;
+  if (visible) visibleCurves.add(key);
+  else visibleCurves.delete(key);
+  syncCurveControls();
+  markCharts();
+}
+
+function selectCurves(preset) {
+  if (!['all','speed','pwm','none'].includes(preset)) return;
+  visibleCurves.clear();
+  for (const curve of CURVES) {
+    if (preset === 'all' || curve.group === preset) visibleCurves.add(curve.key);
+  }
+  syncCurveControls();
+  markCharts();
+}
+
+function syncCurveControls() {
+  document.querySelectorAll('[data-curve]').forEach(input => {
+    input.checked = visibleCurves.has(input.dataset.curve);
+  });
+  document.querySelectorAll('[data-curves]').forEach(button => {
+    const preset = button.dataset.curves;
+    const selected = CURVES.every(curve => visibleCurves.has(curve.key) ===
+      (preset === 'all' || curve.group === preset));
+    button.setAttribute('aria-pressed', String(selected));
+  });
+  $('curveCount').textContent = `${visibleCurves.size} / ${CURVES.length} 条曲线`;
+}
+
+let chartDirty = false;
+function markCharts() {
+  if (chartDirty) return;
+  chartDirty = true;
+  requestAnimationFrame(() => {
+    chartDirty = false;
+    drawSpeedChart();
+    drawPwmChart();
+  });
+}
+
+function chartColors() {
+  const css = getComputedStyle(document.documentElement);
+  return {
+    grid: (css.getPropertyValue('--chart-grid') || '#e8edf3').trim(),
+    text: (css.getPropertyValue('--chart-text') || '#78879b').trim(),
+    left: (css.getPropertyValue('--left') || '#2878df').trim(),
+    right: (css.getPropertyValue('--right') || '#dc861b').trim()
+  };
+}
+
+function setTheme(theme, remember = true) {
+  theme = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  const dark = theme === 'dark';
+  $('btnTheme').textContent = dark ? '☀ 浅色模式' : '☾ 深色模式';
+  $('btnTheme').setAttribute('aria-pressed', String(dark));
+  $('btnTheme').title = dark ? '切换为浅色模式' : '切换为深色模式';
+  if (remember) {
+    try { localStorage.setItem('car-console-theme', theme); } catch (_) {}
+  }
+  markCharts();
+}
+
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const w = Math.max(1, rect.width), h = Math.max(1, rect.height);
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {ctx, w, h};
+}
+
+function polyline(ctx, points, color, width, dash) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineJoin = 'round';
+  ctx.setLineDash(dash || []);
+  ctx.beginPath();
+  let started = false;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) { started = false; continue; }
+    if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawSpeedChart() { drawChart(speedChart, 'speed', 60, 20); }
+function drawPwmChart() { drawChart(pwmChart, 'pwm', 20, 10); }
+
+function drawChart(canvas, group, minimum, step) {
+  const COLOR = chartColors();
+  const {ctx, w, h} = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const pad = {l:46, r:16, t:16, b:26};
+  const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  const curves = CURVES.filter(curve => curve.group === group && visibleCurves.has(curve.key));
+  const now = app.series.length ? app.series[app.series.length - 1].t : 0;
+  const pts = app.series.filter(sample => sample.t >= now - WINDOW_MS);
+  let maxAbs = minimum;
+  for (const sample of pts) {
+    for (const curve of curves) maxAbs = Math.max(maxAbs, Math.abs(sample[curve.key]));
+  }
+  const yMax = Math.ceil(maxAbs / step) * step;
+  ctx.strokeStyle = COLOR.grid;
+  ctx.fillStyle = COLOR.text;
+  ctx.font = '10px "Cascadia Mono", Consolas, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 1;
+  for (let value = -yMax; value <= yMax; value += yMax / 2) {
+    const y = pad.t + ih / 2 - value / yMax * ih / 2;
+    ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(w-pad.r,y); ctx.stroke();
+    ctx.fillText(String(Math.round(value)),pad.l-10,y);
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  for (let seconds = -10; seconds <= 0; seconds += 2) {
+    const x = pad.l + (seconds+10)/10 * iw;
+    ctx.beginPath(); ctx.moveTo(x,pad.t); ctx.lineTo(x,h-pad.b); ctx.stroke();
+    ctx.fillText(seconds === 0 ? '现在' : `${seconds}s`, x, h-8);
+  }
+  if (!curves.length || !pts.length) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '12px "Segoe UI", "Microsoft YaHei UI", sans-serif';
+    ctx.fillText(!curves.length ? '未选择曲线 · 勾选上方通道以显示' : '等待车辆回传数据', pad.l+iw/2, pad.t+ih/2);
+    return;
+  }
+  for (const curve of curves) {
+    const points = pts.map(sample => ({
+      x:pad.l+(sample.t-(now-WINDOW_MS))/WINDOW_MS*iw,
+      y:pad.t+ih/2-sample[curve.key]/yMax*ih/2
+    }));
+    polyline(ctx,points,COLOR[curve.side],curve.width,curve.dash);
+  }
+}
+
+/* ============================================================
+   CSV
+   ============================================================ */
+function exportCsv() {
+  if (!app.rows.length) { log('没有回传数据可导出', 'warn'); return; }
+  const header = ['time_s', 'state', 'fault', 'left_ref', 'left_rpm', 'right_ref', 'right_rpm',
+                  'left_pwm', 'right_pwm', 'result', 'frames',
+                  'left_kp', 'left_ki', 'left_kd', 'right_kp', 'right_ki', 'right_kd'];
+  const lines = [header.join(',')];
+  for (const r of app.rows) lines.push(r.join(','));
+  const blob = new Blob([lines.join('\n')], {type: 'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `car_run_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  log(`已导出 ${app.rows.length} 行 CSV`, 'ok');
+}
+
+/* ============================================================
+   事件
+   ============================================================ */
+btnChoose.addEventListener('click', choosePort);
+btnConnect.addEventListener('click', connect);
+btnDisconnect.addEventListener('click', () => disconnect(true));
+btnArm.addEventListener('click', arm);
+btnStop.addEventListener('click', stop);
+btnCsv.addEventListener('click', exportCsv);
+safeCheck.addEventListener('change', () => {
+  // 撤回安全确认时立即停止，避免“确认已取消但车还在跑”。
+  if (!safeCheck.checked && app.connected && (app.armed || app.pendingArm)) {
+    log('已取消安全确认，自动停止', 'warn');
+    stop();
+  }
+  updateButtons();
+});
+
+rpmRange.addEventListener('input', () => setRpm(parseInt(rpmRange.value, 10)));
+rpmInput.addEventListener('change', () => setRpm(parseInt(rpmInput.value, 10)));
+setRpm(60);
+
+document.querySelectorAll('[data-pid]').forEach(btn => {
+  btn.addEventListener('click', () => writePid(parseInt(btn.dataset.pid, 10)));
+});
+
+document.querySelectorAll('[data-key]').forEach(btn => {
+  const key = btn.dataset.key;
+  const down = e => {
+    e.preventDefault();
+    try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+    pressKey(key, true);
+  };
+  const up = () => pressKey(key, false);
+  btn.addEventListener('pointerdown', down);
+  btn.addEventListener('pointerup', up);
+  btn.addEventListener('pointercancel', up);
+  btn.addEventListener('lostpointercapture', up);
+});
+
+const KEYMAP = {w: 'w', a: 'a', s: 's', d: 'd',
+                arrowup: 'w', arrowleft: 'a', arrowdown: 's', arrowright: 'd'};
+
+function keyName(event) {
+  const k = (event.key || '').toLowerCase();
+  if (KEYMAP[k]) return KEYMAP[k];
+  const c = (event.code || '').toLowerCase();
+  return KEYMAP[c] || (/^key[wasd]$/.test(c) ? c.slice(3) : null);
+}
+
+function inFormField(event) {
+  const target = event.target;
+  return !!(target && target.matches && target.matches('input, select, textarea'));
+}
+
+document.addEventListener('keydown', event => {
+  // 空格永远是急停，即使焦点在输入框里；数字输入框不需要输入空格。
+  if (event.code === 'Space') {
+    event.preventDefault();
+    if (!event.repeat) stop();
+    return;
+  }
+  if (inFormField(event)) return;
+  const key = keyName(event);
+  if (key) {
+    event.preventDefault();
+    if (!event.repeat) pressKey(key, true);
+  }
+});
+
+document.addEventListener('keyup', event => {
+  // 释放必须无条件处理：否则按住 W 时把焦点切到输入框再松手，
+  // W 会永远留在按键集合里，车会一直前进。
+  const key = keyName(event);
+  if (key) pressKey(key, false);
+});
+
+// 编辑输入框前先撤销所有驾驶键，避免残留按键。
+document.addEventListener('focusin', event => {
+  if (!inFormField(event) || !app.keys.size) return;
+  app.keys.clear();
+  updateDriveButtons();
+  drive();
+});
+
+window.addEventListener('blur', () => {
+  if (app.connected) {
+    log('窗口失焦，自动停止', 'warn');
+    stop();
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && app.connected) stop();
+});
+
+window.addEventListener('beforeunload', () => {
+  app.armed = false;
+  app.pendingArm = false;
+  app.armEpoch++;
+  discardQueued();
+  if (app.writer) {
+    try { app.writer.write(frame(CMD_STOP)).catch(() => {}); } catch (_) {}
+  }
+});
+
+window.addEventListener('resize', markCharts);
+document.querySelectorAll('[data-curve]').forEach(input => {
+  input.addEventListener('change', () => setCurveVisible(input.dataset.curve, input.checked));
+});
+document.querySelectorAll('[data-curves]').forEach(button => {
+  button.addEventListener('click', () => selectCurves(button.dataset.curves));
+});
+syncCurveControls();
+
+/* ============================================================
+   100 ms 周期：发送轮速、超时保护、按钮刷新
+   ============================================================ */
+setInterval(() => {
+  if (!app.connected) return;
+  const age = app.lastRx ? performance.now() - app.lastRx : Infinity;
+
+  if (!app.lastSample && !app.noTelemetryWarned && performance.now() - app.connectAt > 2000) {
+    app.noTelemetryWarned = true;
+    log('已连接但 2 秒内没有回传：检查波特率、蓝牙配对和 COM 口', 'warn');
+  }
+
+  if ((app.armed || app.pendingArm) && age > RX_STALE_MS) {
+    if (!app.linkWarned) {
+      app.linkWarned = true;
+      log('回传中断超过 350 ms，已发送停止', 'error');
+    }
+    stop();
+  }
+
+  if (app.pendingArm && performance.now() - app.armSentAt > 1000) {
+    log('未收到运行状态确认，请求停止', 'warn');
+    stop();
+  }
+
+  if (app.armed) drive();
+
+  if (age === Infinity) {
+    ageVal.textContent = '--';
+  } else {
+    ageVal.textContent = (age / 1000).toFixed(2) + ' s';
+    ageVal.classList.toggle('bad', age > RX_STALE_MS);
+  }
+
+  updateButtons();
+}, TX_PERIOD_MS);
+
+/* 首次提示 */
+let savedTheme = 'light';
+try { savedTheme = localStorage.getItem('car-console-theme') || 'light'; } catch (_) {}
+setTheme(savedTheme, false);
+$('btnTheme').addEventListener('click', () => {
+  setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+});
+markCharts();
+updateButtons();
+log('调试台就绪。先配对蓝牙并选择出站 COM 口，再点击「连接」。', 'info');
+(function browserHint() {
+  const match = (navigator.userAgent || '').match(/Chrome\/(\d+)/);
+  if (match && Number(match[1]) < 117) {
+    log('浏览器内核低于 117，可能看不到蓝牙 SPP 串口；建议升级 Chrome / Edge', 'warn');
+  }
+})();
+</script>
+</body>
+</html>
