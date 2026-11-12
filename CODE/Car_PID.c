@@ -653,6 +653,16 @@ float Car_PidInc_update_dt(Car_PidInc_Struct *p, float target, float measure,
         goto invalid;
     }
 
+    /*
+     * 单精度的各项差分与累加都会舍入。按同一控制律的绝对项逐拍重锚，
+     * 避免重复输入把舍入偏差累积成持续驱动；不能只校正限幅后的输出。
+     */
+    candidate = base + p->integral;
+    if (!number(candidate))
+    {
+        goto invalid;
+    }
+
     p->saturated = (candidate > p->output_limit || candidate < -p->output_limit);
     p->unclamped_output = candidate;                        /* 保存完整递推基准 */
     output = clip(candidate, p->output_limit);              /* 仅对执行器输出限幅 */

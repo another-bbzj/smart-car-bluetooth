@@ -110,6 +110,31 @@ static void test_incremental_terms_and_timing(void)
     check_incremental(Car_PidInc_update(&p, 100, 1), -10, "filtered measurement derivative");
 }
 
+static void test_incremental_periodic_no_drift(void)
+{
+    Car_PidInc_Struct p;
+    float target[16] = {0}, measure[16] = {0}, acceleration[16] = {0};
+    unsigned seed = 12345, i, cycle;
+    assert(Car_PidInc_init(&p, 12, 0, 0, 1000));
+    assert(Car_PidInc_configure(&p, 0.65f, 0.02f, 0.6f, 20, 1.2f, 0.1f));
+    for (i = 0; i < 15; i++)
+    {
+        seed = seed * 1664525U + 1013904223U;
+        target[i] = (float)((int)(seed % 361U) - 180);
+        seed = seed * 1664525U + 1013904223U;
+        measure[i] = (float)((int)(seed % 361U) - 180);
+        seed = seed * 1664525U + 1013904223U;
+        acceleration[i] = (float)((int)(seed % 401U) - 200);
+    }
+    /* Each cycle ends at zero P/FF; Ki=Kd=0 means the expected output is zero.
+     * Repeating the same finite differences exposes systematic rounding drift. */
+    for (cycle = 0; cycle < 100000; cycle++)
+        for (i = 0; i < 16; i++)
+            (void)Car_PidInc_update_dt(&p, target[i], measure[i], acceleration[i], 0.005f);
+    check_incremental(p.last_output, 0, "periodic input must not accumulate output drift");
+    assert(!p.fault);
+}
+
 static void test_incremental_matches_positional(void)
 {
     Car_Pid_Struct pos;
@@ -214,12 +239,13 @@ int main(void)
     test_incremental_integral_limit();
     test_incremental_reset_and_faults();
     test_incremental_terms_and_timing();
+    test_incremental_periodic_no_drift();
     test_incremental_matches_positional();
     if (incremental_failures)
     {
         fprintf(stderr, "incremental PID: %u failed checks\n", incremental_failures);
         return 1;
     }
-    puts("advanced speed controller: all checks passed (including 6 incremental PID scenarios)");
+    puts("advanced speed controller: all checks passed (including 7 incremental PID scenarios)");
     return 0;
 }

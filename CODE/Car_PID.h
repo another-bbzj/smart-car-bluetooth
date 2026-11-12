@@ -143,6 +143,7 @@ float Car_Pid_update(Car_Pid_Struct *p, float target, float measure);
  *   其中 P、D、FF 的绝对项定义与位置式完全相同，增量由相邻两周期作差得到；
  *   ΔI 是最终接纳的积分变化量。递推使用未限幅的累加值 unclamped_output，
  *   last_output 仅保存实际限幅输出，不能作为下一周期的递推基准。
+ *   每周期用绝对项重锚累加值，避免单精度差分和累加的舍入误差持续漂移。
  */
 typedef struct
 {
