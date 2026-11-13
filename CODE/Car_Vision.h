@@ -17,6 +17,7 @@
  *   - HELLO = 0：负载 0 字节、age 为 0；
  *   - TRACK = 1：负载 16 字节；
  *   - SUDOKU_TILE = 2：负载 10 字节；
+ *   - NATIVE_PURSUIT = 3：负载 16 字节，仅曲率有效，线上右正，接收后转为左正；
  *   - 仅停车时允许 HELLO 绑定非零会话；
  *   - 本接口中的消息不能启动电机或写入 PWM。
  *
@@ -72,7 +73,7 @@ typedef struct
     /* 以下几何量仅在 valid_mask 对应位为 1 时有效。 */
     float lateral_m;             /* 横向误差，单位米，左正 */
     float heading_rad;           /* 航向误差，单位弧度，逆时针正 */
-    float curvature_inv_m;       /* 曲率，单位 1/米 */
+    float curvature_inv_m;       /* 曲率，单位 1/米，归一化为左转正 */
     float distance_m;            /* 元素距离，单位米 */
     float confidence;            /* 置信度，范围 0~1，由线上千分数换算 */
 

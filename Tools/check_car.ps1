@@ -26,6 +26,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Core test compilation failed' }
     & (Join-Path $carOutput 'test_car_core.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
+    clang -std=c99 -Wall -Wextra -Werror -I CODE Tests/test_car_auto.c CODE/Car_Core.c CODE/Car_PID.c CODE/Car_Reference.c -o build/test_car_auto.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Autonomy test compilation failed' }
+    & (Join-Path $carOutput 'test_car_auto.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Autonomy tests failed' }
     clang -std=c99 -Wall -Wextra -Werror -I CODE Tests/test_car_pid.c CODE/Car_PID.c CODE/Car_Reference.c -o build/test_car_pid.exe
     if ($LASTEXITCODE -ne 0) { throw 'PID/reference test compilation failed' }
     & (Join-Path $carOutput 'test_car_pid.exe')
@@ -34,6 +38,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Vision test compilation failed' }
     & (Join-Path $carOutput 'test_car_vision.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Vision tests failed' }
+    clang++ -std=c++17 -Wall -Wextra -Werror Tests/test_vision_wire.cpp -o build/test_vision_wire.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Vision encoder compilation failed' }
+    & (Join-Path $carOutput 'test_vision_wire.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Vision encoder tests failed' }
+    node Tests/test_car_console.cjs
+    if ($LASTEXITCODE -ne 0) { throw 'Console tests failed' }
     $carProject = Join-Path $carRoot 'MDK-ARM/NEUQ_STM32F407VET6_Opensource_Library.uvprojx'
     $carLog = Join-Path $carOutput 'keil_car.log'
     if (!(Test-Path -LiteralPath $Keil)) { throw "Keil executable missing: $Keil" }

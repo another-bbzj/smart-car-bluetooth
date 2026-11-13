@@ -5,6 +5,7 @@
 
 #include "Car_PID.h"
 #include "Car_Reference.h"
+#include "Car_Vision.h"
 
 /*
  * ============================================================================
@@ -42,8 +43,11 @@ enum
     CAR_DIRECTION_FAULT, /* 3：转向异常 */
     CAR_RX_FAULT,        /* 4：蓝牙接收异常 */
     CAR_TIMING_FAULT,    /* 5：控制周期异常 */
-    CAR_CONTROLLER_FAULT /* 6：控制器配置或数值异常 */
+    CAR_CONTROLLER_FAULT, /* 6：控制器配置或数值异常 */
+    CAR_VISION_FAULT      /* 7：自主模式视觉无效、过期或会话变化 */
 };
+
+enum { CAR_MODE_MANUAL, CAR_MODE_AUTO };
 
 /*
  * 蓝牙协议摘要。
@@ -56,7 +60,8 @@ enum
  *     2 STOP    ：停止/清故障，无负载；
  *     3 WHEELS  ：双轮目标转速，两个大端 int16；
  *     4 PID     ：设置 PID，轮号 0/1 + 三个大端 uint16（Kp/Ki/Kd，放大 100 倍）；
- *     5 HEARTBEAT：心跳，无负载。
+ *     5 HEARTBEAT：心跳，无负载；
+ *     6 AUTO_ARM：停车时启动低速视觉模式，直径 mm/轮距 mm/速度 mm/s 三个大端 uint16。
  *
  *   result：0 成功，1 状态不允许，2 参数无效，3 帧或命令无效。
  */
@@ -88,6 +93,16 @@ typedef struct
     uint8_t state;           /* 整车状态，取值见上方 CAR_STOP/CAR_RUN/CAR_FAULT */
     uint8_t fault;           /* 故障码，取值见上方 CAR_*_FAULT */
     uint8_t result;          /* 最近一条命令或帧的处理结果 */
+    uint8_t mode;            /* MANUAL 或 AUTO；STOP 后回到 MANUAL */
+    uint8_t vision_present;  /* 通过几何/有效位检查，年龄还需单独检查 */
+    uint16_t vision_sequence;
+    uint32_t vision_session;
+    uint32_t auto_session;   /* 启动时固定会话，中途不允许更换 */
+    uint32_t vision_age_us;  /* 重复读取同一帧不得刷新年龄 */
+    float vision_curvature;  /* 1/m，左转为正 */
+    float auto_diameter_m;
+    float auto_track_m;
+    float auto_speed_m_s;
 
     /* 蓝牙解析上下文。 */
     uint8_t parse_state;     /* 解析状态机当前状态 0~5 */
@@ -104,6 +119,12 @@ typedef struct
  * @note 正常进入 STOP；控制器配置失败时进入 FAULT。
  */
 void Car_Init(Car_Core *c);
+
+/** 由控制上下文传入已由 CarVision 校验的快照；NULL 表示无有效观测。
+ * now_ms 与快照 received_ms 使用相同时钟。不使能、不直接写输出。
+ * 重读相同 session/sequence 不刷新年龄；自主故障须先 STOP 再重新使能。 */
+void Car_SetVisionObservation(Car_Core *c, const CarVisionObservation *observation,
+                              uint32_t now_ms);
 
 /**
  * @brief 对一个字节更新 CRC-8，返回新的累计值。

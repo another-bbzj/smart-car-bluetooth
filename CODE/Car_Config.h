@@ -32,6 +32,11 @@
 #define CAR_ENCODER_CPR         (11.0f * 4.0f * 10.0f)
 /* 指令限速（rpm）、PWM 数值限幅、参考加速度（rpm/s）及加加速度（rpm/s²）。 */
 #define CAR_RPM_LIMIT           180.0f
+/* 低速视觉调试：尺寸由 AUTO_ARM 必填，不能用相机模型的轴距替代轮距。 */
+#define CAR_AUTO_RPM_LIMIT      60.0f
+#define CAR_AUTO_MAX_AGE_MS     100U
+#define CAR_AUTO_MIN_CONFIDENCE 0.8f
+#define CAR_AUTO_MAX_CURVATURE  8.0f
 /* NEUQ 库 PWM_MAX=10000 对应 100%，3500 即最大 35% 占空比。 */
 #define CAR_PWM_LIMIT           3500.0f
 #define CAR_ACCEL_LIMIT_RPM_S   200.0f
