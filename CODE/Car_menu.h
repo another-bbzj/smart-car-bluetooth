@@ -116,7 +116,7 @@ typedef enum
 /*
  * 可在菜单里编辑的参数。
  * 参考提交文件的做法：MenuConfig.value 指向这里的 int32_t 字段，
- * 浏览时按 OK 进入编辑，UP/DOWN 按 step 调整，OK 提交，双击 OK 取消。
+ * 浏览时按 OK 进入编辑，UP/DOWN 按 step 调整，OK 提交，BACK 或双击 OK 取消。
  */
 typedef struct
 {

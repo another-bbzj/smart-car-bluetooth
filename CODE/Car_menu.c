@@ -14,8 +14,8 @@
  *      父子关系和环形同级双向链表；
  *   3. page 是当前页面，selected 永远是 page 的子节点；
  *   4. editing = 0 浏览，editing = 1 编辑；
- *   5. UP/DOWN 在环形同级链表里移动，OK 进入/编辑，双击 OK 返回，
- *      长按 OK 回到 MAIN。
+ *   5. UP/DOWN 在环形同级链表里移动，OK 进入/编辑，BACK 或双击 OK 返回，
+ *      长按 OK / 长按 BACK 回到 MAIN。
  *
  *   一级目录固定四类：数独、香橙派、赛题元素PID、电池电压显示。
  *   MAIN 只是导航根页面，不属于第五类。
@@ -543,14 +543,14 @@ uint16_t Car_Menu_LinkErrorCount(void)
 /*
  * 函数名称：Car_Menu_Update
  * 函数功能：根据按键事件推进浏览或编辑状态机。
- * 参数说明：key   —— 按键编号（KEY_UP/KEY_DOWN/KEY_OK）；
+ * 参数说明：key   —— 按键编号（KEY_UP/KEY_DOWN/KEY_OK/KEY_BACK）；
  *           event —— 按键事件。
  * 返回参数：1 状态改变；0 忽略。
  * 使用示例：
  *     Car_Menu_Update(KEY_OK, KEY_EVENT_SINGLE_CLICK);
- * 备注信息：浏览模式下 UP/DOWN 移动，OK 进入/编辑，双击 OK 返回，
- *           长按 OK 回到 MAIN；编辑模式下 UP/DOWN 调整，OK 提交，
- *           双击 OK 取消。
+ * 备注信息：浏览模式下 UP/DOWN 移动，OK 进入/编辑，BACK 或双击 OK 返回，
+ *           长按 OK / 长按 BACK 回到 MAIN；编辑模式下 UP/DOWN 调整，
+ *           OK 提交，BACK 或双击 OK 取消。
  */
 uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
 {
@@ -618,6 +618,16 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                 }
                 break;
 
+            case KEY_BACK:
+                if (event == KEY_EVENT_SINGLE_CLICK ||
+                    event == KEY_EVENT_DOUBLE_CLICK ||
+                    event == KEY_EVENT_LONG_PRESS)
+                {
+                    editing = 0U;
+                    return 1U;
+                }
+                break;
+
             default:
                 break;
         }
@@ -672,6 +682,28 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
             }
 
             if (event == KEY_EVENT_DOUBLE_CLICK)
+            {
+                if (page->parent != NULL)
+                {
+                    selected = page;
+                    page = page->parent;
+                    return 1U;
+                }
+                return 0U;
+            }
+
+            if (event == KEY_EVENT_LONG_PRESS)
+            {
+                page = &nodes[MAIN];
+                selected = page->child;
+                editing = 0U;
+                return 1U;
+            }
+            break;
+
+        case KEY_BACK:
+            if (event == KEY_EVENT_SINGLE_CLICK ||
+                event == KEY_EVENT_DOUBLE_CLICK)
             {
                 if (page->parent != NULL)
                 {

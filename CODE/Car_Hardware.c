@@ -66,6 +66,8 @@
 #include "Car_Core.h"
 #include "Car_Hardware.h"
 #include "My_Vofa.h"
+#include "Car_menu.h"
+#include "Car_adc.h"
 
 /* NEUQ 库内部接口：声明在此以便直接为指定串口打开单字节接收中断。 */
 void NEUQ_Uart_Enable_RX_Interrupt(UART_DEV_ENUM dev, uint8_t priority);
@@ -650,15 +652,21 @@ void Car_Main(void)
                     ? __HAL_TIM_GET_COUNTER(&control_clock)
                     : 0U;
 
+    /* 电池电压采样/低压报警；四键菜单建链与按键初始化。 */
+    Car_Adc_Init();
+    Car_Menu_Init();
+
     /*
      * 所有共享对象和外设就绪后再启动控制。
      * 如果 TIM5 初始化失败，dt 将保持 0，Car_TickDt 会触发时序故障。
      */
     NEUQ_PIT_init_ms(PIT_CH1, CAR_PERIOD_MS);
 
-    /* 控制由 PIT 中断驱动，主循环只持续推进遥测串口发送。 */
+    /* 控制由 PIT 中断驱动；主循环负责遥测、电压采样和菜单按键。 */
     while (1)
     {
+        Car_Adc_Task();                            /* 电池电压，内部 50 ms 限速 */
+        Car_Menu_Poll();                           /* 四键扫描、浏览/编辑 */
         My_Vofa_poll();                            /* 发送已排队的遥测数据 */
     }
 }

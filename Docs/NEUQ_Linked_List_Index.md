@@ -375,11 +375,13 @@ for i in 0..MENU_COUNT-1:
 |---|---|---|
 | 浏览 | UP/DOWN 单击或长按重复 | 同级 `prev/next`，环形回绕 |
 | 浏览 | OK 单击 | 有子节点则进入；否则 `value != NULL` 则进入编辑 |
-| 浏览 | OK 双击 | 返回父页面 |
-| 浏览 | OK 长按 | 回到 MAIN |
+| 浏览 | OK 双击 / BACK 单击 | 返回父页面 |
+| 浏览 | OK 长按 / BACK 长按 | 回到 MAIN |
 | 编辑 | UP/DOWN 单击或长按重复 | `edit_value ± step`，按 min/max 限幅 |
 | 编辑 | OK 单击/长按 | 提交 `*value = edit_value`，退出编辑 |
-| 编辑 | OK 双击 | 取消，退出编辑 |
+| 编辑 | OK 双击 / BACK 单击 | 取消，退出编辑 |
+
+按键引脚按提交的 `NEUQ_KEY.h` 和核心板 J2 排针：**PE10 / PE8 / PE7 / PE9**，低电平有效。
 
 ### 4.2.3 可编辑参数
 
@@ -921,7 +923,7 @@ flowchart LR
   - `Car_Menu_BuildLink()` 按 `parent_id` 建立父子关系和环形同级链；
   - `Car_Menu_Update()` 实现浏览/编辑状态机；
   - 显示层暂时移除（LCD200 横屏 320x240 与原竖屏布局冲突）。
-- `CODE/key.h`：三键驱动接口、双击开关 `KEY_ENABLE_DOUBLE_CLICK`、双击/长按/重复时间参数
+- `CODE/key.h`：四键驱动接口（上/下/确认/返回）、双击开关 `KEY_ENABLE_DOUBLE_CLICK`、双击/长按/重复时间参数
 - `CODE/key.c`：非阻塞去抖状态机、单击/双击/长按/自动重复、事件环形队列
 - `CODE/Car_adc.h / Car_adc.c`：电池电压采样与低电压报警
   - 原理图参考：主板 200k / 20k 分压，RC 滤波；
@@ -934,7 +936,7 @@ flowchart LR
 2. 启动时调用一次 `Car_Menu_Init()`；主循环每 5–10 ms 调用 `Car_Menu_Poll()`。
 3. 启动时调用一次 `Car_Adc_Init()`；主循环每圈调用 `Car_Adc_Task()`（内部按 50 ms 限速）。
 4. 低电压联锁使用 `Car_Adc_IsLow()` / `Car_Adc_IsCut()`；具体降速/停车策略由控制层决定。
-5. 按键默认 PB12/PB13/PB14，低电平有效；可通过 `KEY_UP_PIN` 等宏覆盖。
+5. 按键四键默认 PE10/PE8/PE7/PE9（上/下/确认/返回），低电平有效；可通过 `KEY_UP_PIN` 等宏覆盖。
 6. 显示层恢复前，菜单只做建链、浏览和参数编辑，不上屏。
 7. 双击默认开启；若不需要，将 `KEY_ENABLE_DOUBLE_CLICK` 设为 `0`。
 8. ARMCC 5 在 `--locale=english` 下编译；Keil 工程 MiscControls 已加入该选项。
