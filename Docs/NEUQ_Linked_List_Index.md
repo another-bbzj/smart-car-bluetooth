@@ -923,11 +923,18 @@ flowchart LR
   - 显示层暂时移除（LCD200 横屏 320x240 与原竖屏布局冲突）。
 - `CODE/key.h`：三键驱动接口、双击开关 `KEY_ENABLE_DOUBLE_CLICK`、双击/长按/重复时间参数
 - `CODE/key.c`：非阻塞去抖状态机、单击/双击/长按/自动重复、事件环形队列
+- `CODE/Car_adc.h / Car_adc.c`：电池电压采样与低电压报警
+  - 原理图参考：主板 200k / 20k 分压，RC 滤波；
+  - ADC 原始值 → 引脚电压 → 电池电压 → 一阶低通；
+  - 回差 + 连续采样去抖，输出 NORMAL / WARN / CUT；
+  - ADC 通道、分压阻值、阈值、报警 GPIO 由 `Car_adc.h` 顶部宏填写。
 
 集成步骤：
-1. 在 Keil 工程 `CODE_Bluetooth_Car` 组中加入 `Car_menu.c`、`key.c`；EIDE 使用 `srcDirs: ../CODE` 自动包含。
+1. 在 Keil 工程 `CODE_Bluetooth_Car` 组中加入 `Car_menu.c`、`key.c`、`Car_adc.c`；EIDE 使用 `srcDirs: ../CODE` 自动包含。
 2. 启动时调用一次 `Car_Menu_Init()`；主循环每 5–10 ms 调用 `Car_Menu_Poll()`。
-3. 按键默认 PB12/PB13/PB14，低电平有效；可通过 `KEY_UP_PIN` 等宏覆盖。
-4. 显示层恢复前，菜单只做建链、浏览和参数编辑，不上屏。
-5. 双击默认开启；若不需要，将 `KEY_ENABLE_DOUBLE_CLICK` 设为 `0`。
-6. ARMCC 5 在 `--locale=english` 下编译；Keil 工程 MiscControls 已加入该选项。
+3. 启动时调用一次 `Car_Adc_Init()`；主循环每圈调用 `Car_Adc_Task()`（内部按 50 ms 限速）。
+4. 低电压联锁使用 `Car_Adc_IsLow()` / `Car_Adc_IsCut()`；具体降速/停车策略由控制层决定。
+5. 按键默认 PB12/PB13/PB14，低电平有效；可通过 `KEY_UP_PIN` 等宏覆盖。
+6. 显示层恢复前，菜单只做建链、浏览和参数编辑，不上屏。
+7. 双击默认开启；若不需要，将 `KEY_ENABLE_DOUBLE_CLICK` 设为 `0`。
+8. ARMCC 5 在 `--locale=english` 下编译；Keil 工程 MiscControls 已加入该选项。

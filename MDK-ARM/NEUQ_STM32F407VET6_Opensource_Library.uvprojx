@@ -1079,6 +1079,16 @@
               <FileType>5</FileType>
               <FilePath>../CODE/key.h</FilePath>
             </File>
+            <File>
+              <FileName>Car_adc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/Car_adc.c</FilePath>
+            </File>
+            <File>
+              <FileName>Car_adc.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../CODE/Car_adc.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
