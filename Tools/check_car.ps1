@@ -26,6 +26,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Core test compilation failed' }
     & (Join-Path $carOutput 'test_car_core.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
+    clang -std=c99 -Wall -Wextra -Werror -DCAR_COMMAND_SOURCE_PI=1 -I CODE Tests/test_car_pi_commands.c CODE/Car_Core.c CODE/Car_PID.c CODE/Car_Reference.c -o build/test_car_pi_commands.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Pi command test compilation failed' }
+    & (Join-Path $carOutput 'test_car_pi_commands.exe')
+    if ($LASTEXITCODE -ne 0) { throw 'Pi command tests failed' }
     clang -std=c99 -Wall -Wextra -Werror -I CODE Tests/test_car_pid.c CODE/Car_PID.c CODE/Car_Reference.c -o build/test_car_pid.exe
     if ($LASTEXITCODE -ne 0) { throw 'PID/reference test compilation failed' }
     & (Join-Path $carOutput 'test_car_pid.exe')

@@ -23,6 +23,8 @@ python Tools/car_host.py
 
 速度控制已加入实际采样时间、测量微分滤波、抗积分饱和、可标定前馈和双轮共享进度的加速度/加加速度受限参考，详见[速度控制升级](Docs/Speed_Control_Upgrade.md)。尚未进行实车高速过弯验证。
 
+可编译选择车载香橙派通过 USART3 发送左右轮命令，默认仍是蓝牙控制。此接口仍在开发，使用条件和当前限制见[香橙派轮速命令接入](Docs/Pi_Wheel_Control.md)。
+
 ## 项目贡献者
 
 - [邹俊（another-bbzj）](https://github.com/another-bbzj)

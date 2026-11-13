@@ -470,6 +470,7 @@ void Car_PIT_Handler(void)
      * 蓝牙字节可能丢失，此时不再信任残留队列：
      * 先故障停车，再清空待解析数据。
      */
+#if !CAR_COMMAND_SOURCE_PI
     if (rx_fault)
     {
         Car_Fault(&car, CAR_RX_FAULT);           /* 接收异常立即停车 */
@@ -490,6 +491,24 @@ void Car_PIT_Handler(void)
             Car_FeedByte(&car, byte);            /* 逐字节送入协议解析 */
         }
     }
+#else
+    /* USART3 is the only motion-command source in the competition build. */
+    for (n = 0; n < 32 &&
+         NEUQ_FIFO_read_byte(&rx_fifo, &byte) == NEUQ_FIFO_OK; n++) {}
+    rx_fault = 0;
+    if (vision_rx_fault)
+    {
+        Car_Fault(&car, CAR_RX_FAULT);
+        while (NEUQ_FIFO_read_byte(&vision_fifo, &byte) == NEUQ_FIFO_OK) {}
+        vision_rx_fault = 0;
+    }
+    else
+    {
+        for (n = 0; n < 64 &&
+             NEUQ_FIFO_read_byte(&vision_fifo, &byte) == NEUQ_FIFO_OK; n++)
+            Car_FeedByte(&car, byte);
+    }
+#endif
 
     /* 使用实测周期更新控制器，并把双轮输出应用到电机。 */
     Car_TickDt(&car, l, r, dt_us);
@@ -500,6 +519,7 @@ void Car_PIT_Handler(void)
      * 更新电机后再处理视觉，每周期最多解析 64 字节；视觉解析器只更新观测。
      * 蓝牙接收异常触发停车，视觉接收异常仅使视觉缓存失效。
      */
+#if !CAR_COMMAND_SOURCE_PI
     if (vision_rx_fault)
     {
         CarVision_Invalidate(&vision);           /* 视觉异常使缓存失效 */
@@ -525,6 +545,7 @@ void Car_PIT_Handler(void)
             CarVision_Feed(&vision, byte, now, car.state == CAR_STOP);
         }
     }
+#endif
 
     /* 每 CAR_TELEMETRY_TICKS 个控制周期发送一次 16 通道遥测。 */
     if (++telemetry >= CAR_TELEMETRY_TICKS)

@@ -9,6 +9,16 @@
 /* 香橙派视觉独立串口：USART3，PB10 TX / PB11 RX。 */
 #define CAR_VISION_UART_INDEX   2
 #define CAR_VISION_UART_BAUD    UART_BAUD_115200
+/* 0: UART4 Bluetooth receives the wheel command protocol (debug default).
+ * 1: USART3 receives that same protocol from the onboard Orange Pi.
+ * The selection is compile-time: USART3 cannot simultaneously receive the
+ * separate vision-observation protocol in command-source mode. */
+#ifndef CAR_COMMAND_SOURCE_PI
+#define CAR_COMMAND_SOURCE_PI 0
+#endif
+#if CAR_COMMAND_SOURCE_PI != 0 && CAR_COMMAND_SOURCE_PI != 1
+#error CAR_COMMAND_SOURCE_PI must be 0 or 1
+#endif
 #if CAR_UART_INDEX != 3 || CAR_VISION_UART_INDEX != 2
 #error This board adapter currently supports Bluetooth UART4 and vision USART3 only
 #endif

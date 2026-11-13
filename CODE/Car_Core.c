@@ -391,10 +391,16 @@ static void execute(Car_Core *c)
 
         case 5:
             /* HEARTBEAT：运行时刷新通信看门狗，不改变目标转速。 */
+#if !CAR_COMMAND_SOURCE_PI
             if (c->state == CAR_RUN)
             {
                 c->link_us = 0;           /* 运行中喂看门狗 */
             }
+#else
+            /* In the onboard-computer build only fresh wheel commands may
+             * refresh the deadline: a heartbeat cannot keep an old target. */
+            c->result = 1;
+#endif
             break;
 
         default:
