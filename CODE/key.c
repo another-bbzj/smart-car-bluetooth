@@ -30,11 +30,40 @@
  *   每个按键一个深度为 KEY_EVENT_QUEUE_SIZE 的环形队列；
  *   队列满时丢弃最旧事件并累加 drop_count，保证最新手势不丢失。
  *   Key_Scan() 与 Key_PollEvent() 必须在同一执行上下文，不需要关中断。
+ *
+ * 函数列表（按文件内出现顺序）
+ * ----------------------------------------------------------------------------
+ *   static uint8_t key_read_raw(Key_Id id)
+ *       —— 读取指定按键的原始电平。
+ *   static void key_push_event(Key_State *state, Key_Event event)
+ *       —— 把事件写入环形队列，队列满时丢弃最旧事件。
+ *   static void key_on_press(Key_State *state, uint32_t now_ms)
+ *       —— 稳定按下处理：上报 PRESS，记录长按与双击判定的起点。
+ *   static void key_on_release(Key_State *state, uint32_t now_ms)
+ *       —— 稳定松开处理：区分长按、双击和单击。
+ *   static void key_scan_one(Key_Id id, uint32_t now_ms)
+ *       —— 推进单个按键的去抖、长按和双击状态机。
+ *   void Key_Init(void)
+ *       —— 初始化三个按键引脚和内部状态。
+ *   void Key_Scan(uint32_t now_ms)
+ *       —— 周期采样全部按键并产生事件。
+ *   uint8_t Key_PollEvent(Key_Id id, Key_Event *event)
+ *       —— 从指定按键的事件队列取出一个事件。
+ *   Key_Event Key_GetEvent(Key_Id id)
+ *       —— 取事件；空队列返回 KEY_EVENT_NONE。
+ *   uint8_t Key_IsDown(Key_Id id)
+ *       —— 查询去抖后的按下状态。
+ *   uint32_t Key_GetDropCount(Key_Id id)
+ *       —— 查询因队列满而丢弃的事件数。
  * ============================================================================
  */
 
 #include "NEUQ_lib_include.h"
 #include "key.h"
+
+/* ========================================================================== */
+/*                              按键对象与引脚表                               */
+/* ========================================================================== */
 
 /* 按键对象：保存去抖、点击和事件队列状态。 */
 typedef struct
@@ -69,13 +98,35 @@ static const GPIO_Ports_ENUM key_pins[KEY_COUNT] =
     KEY_OK_PIN
 };
 
-/* 读取原始电平：按下返回 1，松开返回 0。 */
+/* ========================================================================== */
+/*                              内部状态机函数                                 */
+/* ========================================================================== */
+
+/*
+ * 函数名称：key_read_raw
+ * 函数功能：读取指定按键的原始电平。
+ * 参数说明：id —— 按键编号，调用者必须保证在 0 ~ KEY_COUNT-1 范围内。
+ * 返回参数：1 按下；0 松开。
+ * 使用示例：
+ *     uint8_t down = key_read_raw(KEY_OK);
+ * 备注信息：不做去抖；原始值由 key_scan_one() 送入去抖状态机。
+ */
 static uint8_t key_read_raw(Key_Id id)
 {
     return (NEUQ_GPIO_read(keys[id].pin) == KEY_ACTIVE_LEVEL) ? 1U : 0U;
 }
 
-/* 向指定按键的队列写入一个事件；队列满时丢弃最旧事件。 */
+/*
+ * 函数名称：key_push_event
+ * 函数功能：把一个事件写入指定按键的环形队列。
+ * 参数说明：state —— 按键对象；
+ *           event —— 待写入的事件。
+ * 返回参数：无。
+ * 使用示例：
+ *     key_push_event(state, KEY_EVENT_PRESS);
+ * 备注信息：队列满时推进读指针，丢弃最旧事件并累加 drop_count；
+ *           本函数只在 Key_Scan() 的同一上下文调用，不需要临界区。
+ */
 static void key_push_event(Key_State *state, Key_Event event)
 {
     uint8_t next = (uint8_t)((state->queue_head + 1U) % KEY_EVENT_QUEUE_SIZE);
@@ -91,7 +142,17 @@ static void key_push_event(Key_State *state, Key_Event event)
     state->queue_head = next;
 }
 
-/* 稳定按下：立即上报 PRESS，准备长按和点击判定。 */
+/*
+ * 函数名称：key_on_press
+ * 函数功能：处理去抖后的稳定按下：上报 PRESS，重置长按与重复计时。
+ * 参数说明：state  —— 按键对象；
+ *           now_ms —— 本次扫描的毫秒时基。
+ * 返回参数：无。
+ * 使用示例：
+ *     key_on_press(state, HAL_GetTick());
+ * 备注信息：双击开启时，若上一次单击仍在等待窗口，把 click_count 置 2，
+ *           表示“双击候选”，最终结果在松开时确认。
+ */
 static void key_on_press(Key_State *state, uint32_t now_ms)
 {
     uint8_t click_count = state->click_count;
@@ -113,7 +174,17 @@ static void key_on_press(Key_State *state, uint32_t now_ms)
 #endif
 }
 
-/* 稳定松开：区分长按、双击、单击。 */
+/*
+ * 函数名称：key_on_release
+ * 函数功能：处理去抖后的稳定松开，并根据手势产生长按/双击/单击事件。
+ * 参数说明：state  —— 按键对象；
+ *           now_ms —— 本次扫描的毫秒时基。
+ * 返回参数：无。
+ * 使用示例：
+ *     key_on_release(state, HAL_GetTick());
+ * 备注信息：长按松手不产生点击；双击开启时，第一次单击要等窗口到期
+ *           才由 key_scan_one() 补发 SINGLE_CLICK。
+ */
 static void key_on_release(Key_State *state, uint32_t now_ms)
 {
     key_push_event(state, KEY_EVENT_RELEASE);
@@ -147,7 +218,16 @@ static void key_on_release(Key_State *state, uint32_t now_ms)
 #endif
 }
 
-/* 推进单个按键的状态机。 */
+/*
+ * 函数名称：key_scan_one
+ * 函数功能：采样一个按键并推进去抖、长按、重复和双击超时状态。
+ * 参数说明：id     —— 按键编号；
+ *           now_ms —— 本次扫描的毫秒时基，允许 32 位回绕。
+ * 返回参数：无。
+ * 使用示例：
+ *     key_scan_one(KEY_UP, HAL_GetTick());
+ * 备注信息：调用周期建议 5~10 ms；周期过长会漏掉短按。
+ */
 static void key_scan_one(Key_Id id, uint32_t now_ms)
 {
     Key_State *state = &keys[id];
@@ -204,6 +284,19 @@ static void key_scan_one(Key_Id id, uint32_t now_ms)
 #endif
 }
 
+/* ========================================================================== */
+/*                              对外接口                                       */
+/* ========================================================================== */
+
+/*
+ * 函数名称：Key_Init
+ * 函数功能：初始化三个按键引脚为内部上拉输入，并清空事件与计时状态。
+ * 参数说明：无。
+ * 返回参数：无。
+ * 使用示例：
+ *     Key_Init();
+ * 备注信息：在主循环启动前调用一次；重复调用会清空所有待处理事件。
+ */
 void Key_Init(void)
 {
     uint32_t now = HAL_GetTick();
@@ -227,6 +320,19 @@ void Key_Init(void)
     }
 }
 
+/*
+ * 函数名称：Key_Scan
+ * 函数功能：采样全部按键并推进各自的状态机，产生的事件进入队列。
+ * 参数说明：now_ms —— 当前毫秒时基，通常传 HAL_GetTick()；允许 32 位回绕。
+ * 返回参数：无。
+ * 使用示例：
+ *     while (1)
+ *     {
+ *         Key_Scan(HAL_GetTick());
+ *         // 处理其他任务
+ *     }
+ * 备注信息：必须周期调用（建议 5~10 ms），且与 Key_PollEvent() 同一上下文。
+ */
 void Key_Scan(uint32_t now_ms)
 {
     unsigned i;
@@ -237,6 +343,20 @@ void Key_Scan(uint32_t now_ms)
     }
 }
 
+/*
+ * 函数名称：Key_PollEvent
+ * 函数功能：从指定按键的事件队列取出一个事件。
+ * 参数说明：id    —— 按键编号；
+ *           event —— 非空输出，成功时写入事件。
+ * 返回参数：1 取到事件；0 队列为空或参数无效。
+ * 使用示例：
+ *     Key_Event event;
+ *     while (Key_PollEvent(KEY_OK, &event))
+ *     {
+ *         // 处理 event
+ *     }
+ * 备注信息：取出后事件从队列移除；队列为空不会改写 event。
+ */
 uint8_t Key_PollEvent(Key_Id id, Key_Event *event)
 {
     Key_State *state;
@@ -258,6 +378,15 @@ uint8_t Key_PollEvent(Key_Id id, Key_Event *event)
     return 1U;
 }
 
+/*
+ * 函数名称：Key_GetEvent
+ * 函数功能：取出一个事件；队列为空时返回 KEY_EVENT_NONE。
+ * 参数说明：id —— 按键编号。
+ * 返回参数：取到的事件；空队列或参数无效返回 KEY_EVENT_NONE。
+ * 使用示例：
+ *     Key_Event event = Key_GetEvent(KEY_DOWN);
+ * 备注信息：只取一个事件；需要一次处理完队列时使用 Key_PollEvent()。
+ */
 Key_Event Key_GetEvent(Key_Id id)
 {
     Key_Event event = KEY_EVENT_NONE;
@@ -266,6 +395,18 @@ Key_Event Key_GetEvent(Key_Id id)
     return event;
 }
 
+/*
+ * 函数名称：Key_IsDown
+ * 函数功能：查询去抖后的按下状态。
+ * 参数说明：id —— 按键编号。
+ * 返回参数：1 按下；0 松开或参数无效。
+ * 使用示例：
+ *     if (Key_IsDown(KEY_OK))
+ *     {
+ *         // 按下处理
+ *     }
+ * 备注信息：读取的是稳定状态，不产生事件。
+ */
 uint8_t Key_IsDown(Key_Id id)
 {
     if ((unsigned)id >= KEY_COUNT)
@@ -276,6 +417,15 @@ uint8_t Key_IsDown(Key_Id id)
     return keys[id].stable;
 }
 
+/*
+ * 函数名称：Key_GetDropCount
+ * 函数功能：查询指定按键因事件队列满而丢弃的事件数。
+ * 参数说明：id —— 按键编号。
+ * 返回参数：累计丢弃数；参数无效返回 0。
+ * 使用示例：
+ *     uint32_t lost = Key_GetDropCount(KEY_UP);
+ * 备注信息：该值持续增大说明 Key_Scan() 调用过慢或主循环处理事件不及时。
+ */
 uint32_t Key_GetDropCount(Key_Id id)
 {
     if ((unsigned)id >= KEY_COUNT)

@@ -1059,6 +1059,16 @@
               <FileType>1</FileType>
               <FilePath>../CODE/Car_Hardware.c</FilePath>
             </File>
+            <File>
+              <FileName>Car_menu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/Car_menu.c</FilePath>
+            </File>
+            <File>
+              <FileName>key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/key.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

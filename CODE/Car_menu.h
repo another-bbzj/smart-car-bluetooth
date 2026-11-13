@@ -170,6 +170,7 @@ typedef struct CarMenu
     uint8_t category;           /* 当前一级分类 */
     CarMenuLap lap;             /* 屏幕显示的第一圈/第二圈状态 */
     uint8_t dirty;              /* 1 表示需要重绘 */
+    uint8_t link_fault;         /* 1 表示 Car_Menu_ValidateLinks() 自检失败 */
 } CarMenu;
 
 /**
@@ -225,6 +226,21 @@ const CarMenuNode *Car_Menu_GetNode(int16_t index);
  * @brief 节点总数（不含保留的空索引）。
  */
 int16_t Car_Menu_NodeCount(void);
+
+/**
+ * @brief 检查静态链表的建链是否闭合。
+ * @return 1 全部通过；0 存在错误。
+ * @note 检查 next/prev 互逆、parent/child 包含关系、branch_to/merge_to/
+ *       pid_link 目标有效、pid_page 1~13 唯一、四个一级目录入口匹配。
+ *       只读遍历，不修改节点表；结果同时写入内部错误计数。
+ */
+uint8_t Car_Menu_ValidateLinks(void);
+
+/**
+ * @brief 最近一次建链自检发现的错误数量。
+ * @return 错误数；0 表示通过。
+ */
+uint16_t Car_Menu_LinkErrorCount(void);
 
 /**
  * @brief 设置屏幕显示的圈次状态。
