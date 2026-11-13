@@ -3,75 +3,42 @@
 
 #include <stdint.h>
 
+#include "key.h"
+
 /*
  * ============================================================================
  * 文件名称：Car_menu.h
  * ============================================================================
- * 模块功能：NEUQ 智能车校赛链表式目录（Linked-list Index）的页面骨架与
- *           菜单导航接口。
+ * 模块功能：NEUQ 智能车校赛链表式目录（Linked-list Index）。
+ *
+ *   结构参考提交的菜单框架：
+ *     - 用 MenuID 枚举统一编号，MENU_NONE = -1，MAIN = 0，MENU_COUNT 收尾；
+ *     - MenuConfig 只描述“每个页面/节点的静态配置”；
+ *     - MenuNode 在运行时由 Car_Menu_BuildLink() 按 parent_id 建链；
+ *     - 同级节点使用环形双向链表，UP/DOWN 到头自动回绕；
+ *     - page 表示当前页面，selected 永远是 page 的子节点；
+ *     - editing = 0 浏览，editing = 1 编辑。
  *
  *   一级目录固定四类，不增加第五类：
- *       1. 数独
- *       2. 香橙派
- *       3. 赛题元素PID
- *       4. 电池电压显示
+ *       数独、香橙派、赛题元素PID、电池电压显示。
+ *   MAIN 只是导航根页面，不属于一级分类。
  *
- *   链表组织
+ *   显示说明
  *   ------------------------------------------------------------------------
- *   节点存放在只读数组 car_menu_nodes[] 中，节点之间用 16 位索引连接，
- *   0（CAR_MENU_INDEX_NONE）表示空。每个节点同时具备：
- *       prev / next       同级默认前后继，构成双向链表；
- *       branch_to / merge_to  事件分支入口与汇合点；
- *       parent / child    页面层级；
- *       pid_link          跨一级目录的双向链接。
+ *   LCD200 默认 LCD200_DIR_Cross 是 320x240 横屏；原 17 行竖屏布局超出
+ *   240 像素高度，属于显示 bug，已暂时移除渲染代码。菜单的建链、浏览和
+ *   编辑逻辑不依赖 LCD，可先单独调试；显示层按横屏重新设计后再恢复。
  *
- *   导航约定（按键见 key.h）
+ *   调用约定
  *   ------------------------------------------------------------------------
- *       UP/DOWN 单击或长按重复   同级 prev / next，到头回绕；
- *       UP/DOWN 双击             切换一级目录；
- *       UP/DOWN 长按             回到本一级目录入口；
- *       OK 单击                  进入 child，否则跳到 pid_link；
- *       OK 双击                  返回上一个进入点（内部返回栈）；
- *       OK 长按                  切换第一圈/第二圈显示状态。
- *
- *   显示约定
- *   ------------------------------------------------------------------------
- *   LCD200 只有 ASCII 字库，因此页面同时保存中文 name（文档/调试用）和
- *   ASCII label（屏幕显示用）。中文名不直接上屏，避免出现乱码。
- *
- *   集成说明
- *   ------------------------------------------------------------------------
- *   这两个新文件加入 Keil 工程后，在主循环中周期调用 Car_Menu_Poll()，
- *   并在启动时调用一次 Car_Menu_Init()。Car_menu 不修改底盘控制状态；
- *   PID/卡尔曼参数写回、圈次切换等执行动作仍由上层控制模块完成。
+ *   Car_Menu_Init() 初始化参数、建链、自检并初始化按键；
+ *   Car_Menu_Poll() 在主循环周期调用，内部调用 Key_Scan(HAL_GetTick())；
+ *   Car_Menu_Update() 可供主机测试直接注入按键事件。
  * ============================================================================
  */
 
-/* 屏幕显示开关：0 时菜单仍可导航，但不初始化/不绘制 LCD。 */
-#ifndef CAR_MENU_USE_LCD
-#define CAR_MENU_USE_LCD        1
-#endif
-
-/* 链表空索引。数组下标 0 保留为哑节点，因此 0 可以安全表示“无”。 */
-#define CAR_MENU_INDEX_NONE     0
-
 /* 成绩无效标记，用于 160 cm 断路等失败即终止的节点。 */
 #define CAR_MENU_SCORE_INVALID  (-32768)
-
-/* 返回栈深度。 */
-#ifndef CAR_MENU_STACK_DEPTH
-#define CAR_MENU_STACK_DEPTH    8U
-#endif
-
-/* 一级分类，顺序固定，不得增加第五类。 */
-typedef enum
-{
-    CAR_MENU_CAT_SUDOKU = 0,    /* 数独 */
-    CAR_MENU_CAT_ORANGEPI,      /* 香橙派 */
-    CAR_MENU_CAT_PID,           /* 赛题元素PID */
-    CAR_MENU_CAT_BATTERY,       /* 电池电压显示 */
-    CAR_MENU_CAT_COUNT
-} CarMenuCategory;
 
 /* 节点类型。 */
 typedef enum
@@ -101,19 +68,6 @@ typedef enum
     CAR_MENU_LAP_BOTH           /* 全程 */
 } CarMenuLap;
 
-/* 触发条件。 */
-typedef enum
-{
-    CAR_MENU_TRIG_TOPOLOGY = 0, /* 拓扑到达 */
-    CAR_MENU_TRIG_VISION,       /* 视觉检测 */
-    CAR_MENU_TRIG_COLOR,        /* 颜色识别 */
-    CAR_MENU_TRIG_TAG,          /* Tag 识别 */
-    CAR_MENU_TRIG_SITE,         /* 现场公布 */
-    CAR_MENU_TRIG_TIMER,        /* 计时触发 */
-    CAR_MENU_TRIG_VOLTAGE,      /* 电压阈值 */
-    CAR_MENU_TRIG_MANUAL        /* 人工/调试 */
-} CarMenuTrigger;
-
 /* 节点状态。 */
 typedef enum
 {
@@ -131,126 +85,160 @@ typedef enum
 } CarMenuKalman;
 
 /*
- * 链表节点。
- * 所有链接字段都是 car_menu_nodes[] 的下标；CAR_MENU_INDEX_NONE 表示空。
- * 省略的字段由 C99 指定初始化器清零，因此默认就是“无链接”。
+ * 菜单页面编号。
+ * 与提交文件一致：MENU_NONE = -1，MAIN = 0，最后一个枚举 MENU_COUNT。
+ * 枚举顺序同时决定同级节点的初始排列顺序（建链时按 i 递增追加）。
  */
-typedef struct CarMenuNode
+typedef enum
 {
-    const char *id;             /* 节点ID，如 "N01" */
-    const char *name;           /* 中文名称，供文档和调试查看 */
-    const char *label;          /* ASCII 短标签，供 LCD200 显示 */
+    MENU_NONE = -1,             /* 空链接/无父节点 */
+    MAIN = 0,                   /* 导航根页面 */
 
-    CarMenuCategory category;   /* 一级分类 */
-    CarMenuNodeType type;       /* 节点类型 */
-    CarMenuSkip skippable;      /* 是否可屏蔽 */
-    CarMenuLap lap;             /* 适用圈数 */
-    CarMenuTrigger trigger;     /* 触发条件 */
-    CarMenuStatus status;       /* 已确认/现场/TBD */
-    CarMenuKalman kalman;       /* 卡尔曼相关程度 */
-    int16_t score_s;            /* 正数罚时、负数奖励；INVALID 表示成绩无效 */
+    CAT_SUDOKU,                 /* 一级目录：数独 */
+    CAT_ORANGEPI,               /* 一级目录：香橙派 */
+    CAT_PID,                    /* 一级目录：赛题元素PID */
+    CAT_BATTERY,                /* 一级目录：电池电压显示 */
 
-    int16_t prev;               /* 同级前驱 */
-    int16_t next;               /* 同级后继 */
-    int16_t branch_to;          /* 事件分支入口（如路障颜色分支） */
-    int16_t merge_to;           /* 分支汇合点 */
-    int16_t parent;             /* 所属上级页面 */
-    int16_t child;              /* 进入的子页面/子链表 */
-    int16_t pid_link;           /* 跨目录双向链接目标 */
+    S01, S02, S03, S04, S05, S06, S07, S08, S09,
 
-    uint8_t pid_page;           /* PID 页编号 1~13，0 表示非 PID 页 */
-} CarMenuNode;
+    O01, O02, O03, O04, O05, O06, O07, O08,
 
-/* 菜单运行状态。 */
-typedef struct CarMenu
+    N01, N02, N03, N04, N05, N06, N07, N08, N09, N10,
+    N11, N12, N13, N14, N15, N16, N17,
+
+    P01, P02, P03, P04, P05, P06, P07, P08, P09, P10, P11, P12, P13,
+
+    B01, B02, B03, B04, B05, B06,
+
+    MENU_COUNT                  /* 节点总数，不含 MENU_NONE */
+} MenuID;
+
+/*
+ * 可在菜单里编辑的参数。
+ * 参考提交文件的做法：MenuConfig.value 指向这里的 int32_t 字段，
+ * 浏览时按 OK 进入编辑，UP/DOWN 按 step 调整，OK 提交，双击 OK 取消。
+ */
+typedef struct
 {
-    int16_t current;            /* 当前节点索引 */
-    int16_t stack[CAR_MENU_STACK_DEPTH]; /* 返回栈 */
-    uint8_t depth;              /* 返回栈深度 */
-    uint8_t category;           /* 当前一级分类 */
-    CarMenuLap lap;             /* 屏幕显示的第一圈/第二圈状态 */
-    uint8_t dirty;              /* 1 表示需要重绘 */
-    uint8_t link_fault;         /* 1 表示 Car_Menu_ValidateLinks() 自检失败 */
-} CarMenu;
+    int32_t pid_kp;         /* 巡线 P，放大 100 倍 */
+    int32_t pid_ki;         /* 速度 I，放大 100 倍 */
+    int32_t pid_kd;         /* 微分，放大 100 倍 */
+    int32_t kalman_q;       /* 过程噪声 Q，放大 1000 倍 */
+    int32_t kalman_r;       /* 观测噪声 R，放大 1000 倍 */
+    int32_t lap_mode;       /* 0 第一圈，1 第二圈 */
+    int32_t speed_limit;    /* 第二圈限速，rpm */
+    int32_t ring_speed;     /* 环岛速度，rpm */
+    int32_t cone_offset;    /* 锥桶绕行偏移，mm */
+    int32_t red_stop_s;     /* 红障第二圈停车时间，s */
+    int32_t gap_speed;      /* 160cm 断路通过速度，rpm */
+    int32_t battery_low;    /* 低电压阈值，mV */
+} CarMenuParams;
+
+extern CarMenuParams car_menu_params;
+
+/* 页面/节点的静态配置。 */
+typedef struct
+{
+    const char *name;       /* ASCII 显示名 */
+    MenuID parent_id;       /* 父节点编号；MENU_NONE 表示根 */
+    int32_t *value;         /* 可编辑参数地址；NULL 表示纯页面 */
+    int32_t min;            /* 编辑下限 */
+    int32_t max;            /* 编辑上限 */
+    int32_t step;           /* 每次调整步长 */
+    CarMenuNodeType type;
+    CarMenuSkip skippable;
+    CarMenuLap lap;
+    int16_t score_s;        /* 正罚时、负奖励、CAR_MENU_SCORE_INVALID */
+    CarMenuKalman kalman;
+    CarMenuStatus status;
+    MenuID pid_link;        /* 跨目录链接，仅作元数据 */
+} MenuConfig;
 
 /**
- * @brief 初始化按键和 LCD，定位到主链入口并绘制首屏。
- * @note 会调用 Key_Init() 和 NEUQ_LCD200_init()，应在主循环启动前调用一次。
- *       HAL_Delay() 会在此期间执行，不能放在中断里。
+ * @brief 初始化参数、按 parent_id 建链、自检并初始化按键。
+ * @note 不初始化 LCD；当前显示层已暂时移除。
  */
 void Car_Menu_Init(void);
 
 /**
- * @brief 周期任务：扫描按键、处理事件、按需重绘。
- * @note 建议主循环每 5~10 ms 调用一次；不得在中断中调用。
+ * @brief 主循环周期任务：扫描按键并处理浏览/编辑事件。
+ * @note 建议每 5~10 ms 调用一次；不要和 Key_Scan() 的其他调用者并发。
  */
 void Car_Menu_Poll(void);
 
 /**
- * @brief 强制重绘当前页面。
- * @note 未启用 LCD（CAR_MENU_USE_LCD=0）时为空操作。
+ * @brief 显示入口。当前为空实现，显示层待按 320x240 横屏重新设计。
  */
 void Car_Menu_Render(void);
 
 /**
- * @brief 跳转到指定节点。
- * @param index 节点索引，必须大于 0 且小于节点总数。
- * @return 1 成功；0 索引无效。
+ * @brief 注入一个按键事件，推进浏览/编辑状态机。
+ * @param key   按键编号。
+ * @param event 按键事件，只使用单击/双击/长按/重复。
+ * @return 1 状态改变；0 忽略。
+ * @note 供 Car_Menu_Poll() 和主机测试调用。
  */
-uint8_t Car_Menu_Goto(int16_t index);
+uint8_t Car_Menu_Update(Key_Id key, Key_Event event);
 
 /**
- * @brief 按节点ID跳转，例如 "P10"。
- * @param id 以 '\0' 结尾的节点ID；NULL 或未找到返回 0。
- * @return 1 成功；0 未找到。
+ * @brief 按 MenuTable[i].parent_id 构建运行时链表。
+ * @return 1 成功；0 存在 parent_id 非法或自引用。
+ * @note 同级节点使用环形双向链表；child 指向第一个子节点。
  */
-uint8_t Car_Menu_GotoId(const char *id);
+uint8_t Car_Menu_BuildLink(void);
 
 /**
- * @brief 当前节点索引。
- */
-int16_t Car_Menu_CurrentIndex(void);
-
-/**
- * @brief 当前节点只读指针；索引异常时返回入口节点。
- */
-const CarMenuNode *Car_Menu_CurrentNode(void);
-
-/**
- * @brief 按索引取只读节点指针。
- * @return 索引有效返回节点；否则返回 NULL。
- */
-const CarMenuNode *Car_Menu_GetNode(int16_t index);
-
-/**
- * @brief 节点总数（不含保留的空索引）。
- */
-int16_t Car_Menu_NodeCount(void);
-
-/**
- * @brief 检查静态链表的建链是否闭合。
- * @return 1 全部通过；0 存在错误。
- * @note 检查 next/prev 互逆、parent/child 包含关系、branch_to/merge_to/
- *       pid_link 目标有效、pid_page 1~13 唯一、四个一级目录入口匹配。
- *       只读遍历，不修改节点表；结果同时写入内部错误计数。
+ * @brief 检查建链是否闭合。
+ * @return 1 通过；0 存在错误。
+ * @note 检查父指针、环形同级链、根节点唯一性、parent 链可达 MAIN、
+ *       可编辑参数的 min/max/step 以及 pid_link 目标。
  */
 uint8_t Car_Menu_ValidateLinks(void);
 
 /**
- * @brief 最近一次建链自检发现的错误数量。
- * @return 错误数；0 表示通过。
+ * @brief 最近一次建链自检的错误数。
  */
 uint16_t Car_Menu_LinkErrorCount(void);
 
 /**
- * @brief 设置屏幕显示的圈次状态。
- * @note 只影响菜单显示，不改变底盘控制；圈次执行由上层状态机负责。
+ * @brief 当前页面编号（page）。
  */
-void Car_Menu_SetLap(CarMenuLap lap);
+MenuID Car_Menu_GetPageId(void);
 
 /**
- * @brief 读取屏幕显示的圈次状态。
+ * @brief 当前选中项编号（selected）。
  */
-CarMenuLap Car_Menu_GetLap(void);
+MenuID Car_Menu_GetSelectedId(void);
+
+/**
+ * @brief 是否处于编辑模式。
+ */
+uint8_t Car_Menu_IsEditing(void);
+
+/**
+ * @brief 当前编辑值；非编辑模式下为 0。
+ */
+int32_t Car_Menu_GetEditValue(void);
+
+/**
+ * @brief 直接设置编辑值，用于测试或外部恢复；会按 min/max 限幅。
+ */
+void Car_Menu_SetEditValue(int32_t value);
+
+/**
+ * @brief 跳转到指定节点：叶子节点进入其父页面并选中自己，页面节点进入自身。
+ * @return 1 成功；0 编号无效。
+ */
+uint8_t Car_Menu_Goto(MenuID id);
+
+/**
+ * @brief 取节点静态配置；编号无效返回 NULL。
+ */
+const MenuConfig *Car_Menu_GetConfig(MenuID id);
+
+/**
+ * @brief 节点总数（MENU_COUNT）。
+ */
+int16_t Car_Menu_NodeCount(void);
 
 #endif

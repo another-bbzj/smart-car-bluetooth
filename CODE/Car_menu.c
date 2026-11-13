@@ -7,1544 +7,512 @@
  * ============================================================================
  * 模块功能
  * ----------------------------------------------------------------------------
- * 校赛知识库的链表式目录与 LCD 菜单骨架。一级目录固定四类：
- *   数独、香橙派、赛题元素PID、电池电压显示。
+ * 链表式目录的建链、浏览和编辑核心。结构参考提交文件：
  *
- * 节点组织
+ *   1. MenuTable[] 只描述静态配置：name、parent_id、value、min/max/step；
+ *   2. Car_Menu_BuildLink() 在运行时把 nodes[] 按 parent_id 建成
+ *      父子关系和环形同级双向链表；
+ *   3. page 是当前页面，selected 永远是 page 的子节点；
+ *   4. editing = 0 浏览，editing = 1 编辑；
+ *   5. UP/DOWN 在环形同级链表里移动，OK 进入/编辑，双击 OK 返回，
+ *      长按 OK 回到 MAIN。
+ *
+ *   一级目录固定四类：数独、香橙派、赛题元素PID、电池电压显示。
+ *   MAIN 只是导航根页面，不属于第五类。
+ *
+ * 显示说明
  * ----------------------------------------------------------------------------
- *   car_menu_nodes[] 是只读节点表，下标 0 保留为空索引（CAR_MENU_INDEX_NONE）。
- *   prev/next 组成同级双向链表；child 进入子链表；parent 指向所属页面；
- *   branch_to/merge_to 表示事件分支入口和汇合点；pid_link 表示跨目录链接。
- *
- *   主链 N01~N17 按“发车→第一圈→基本元素→路障分支→第一圈结束→
- *   第二圈低速→红障停车→数独→盲盒→真停车点→结算”组织。
- *   N07 的 branch_to 指向路障颜色分支 N08/N09/N10，三者 merge_to = N11。
- *   路障位置不写死：N07 由颜色识别事件触发，分支结束后汇合回主链。
- *
- * 显示与交互
- * ----------------------------------------------------------------------------
- *   LCD200 只有 ASCII 字体，节点同时保存中文 name 与 ASCII label；
- *   屏幕显示 label/ID/枚举状态，中文 name 留给文档和调试查看。
- *   按键事件由 key.c 提供，导航约定见 Car_menu.h。
+ *   LCD200 默认 Cross 横屏是 320x240；原 17 行竖屏布局超过 240 像素高度，
+ *   属于显示 bug，已暂时移除渲染代码。本文件的建链/浏览/编辑不依赖 LCD。
  *
  * 函数列表（按文件内出现顺序）
  * ----------------------------------------------------------------------------
- *   static const char *menu_enum_text(const char *const *table, unsigned count,
- *                                     unsigned value)
- *       —— 按枚举值取 LCD 文本，越界返回 "?"。
- *   static const char *menu_index_id(int16_t index, char *buffer, size_t size)
- *       —— 把节点索引转换成 ID 文本。
- *   static void menu_score_text(int16_t score, char *buffer, size_t size)
- *       —— 把罚时/奖励格式化成 ASCII。
- *   static void menu_pid_text(uint8_t page, char *buffer, size_t size)
- *       —— 把 PID 页编号格式化成 "PID-xx"。
- *   static void menu_push(int16_t index)
- *       —— 把当前节点压入返回栈。
- *   static void menu_move(int8_t direction)
- *       —— 同级前后移动，到头回绕。
- *   static void menu_switch_category(int8_t direction)
- *       —— 切换一级目录。
- *   static void menu_home(void)
- *       —— 回到当前一级目录入口。
- *   static void menu_enter(void)
- *       —— 进入 child，否则跳到 pid_link。
- *   static void menu_back(void)
- *       —— 返回上一个进入点。
- *   static void menu_toggle_lap(void)
- *       —— 切换屏幕显示的第一圈/第二圈。
- *   static void menu_dispatch_key(Key_Id id, Key_Event event)
- *       —— 分发一个按键事件。
- *   static void menu_handle_keys(void)
- *       —— 取出并处理全部按键事件。
- *   void Car_Menu_Init(void)
- *       —— 初始化按键和 LCD，定位到主链入口并绘制首屏。
- *   void Car_Menu_Poll(void)
- *       —— 周期扫描按键、处理事件、按需重绘。
- *   void Car_Menu_Render(void)
- *       —— 绘制当前节点页面。
- *   uint8_t Car_Menu_Goto(int16_t index)
- *       —— 按索引跳转。
- *   uint8_t Car_Menu_GotoId(const char *id)
- *       —— 按节点 ID 跳转。
- *   int16_t Car_Menu_CurrentIndex(void)
- *       —— 当前节点索引。
- *   const CarMenuNode *Car_Menu_CurrentNode(void)
- *       —— 当前节点只读指针。
- *   const CarMenuNode *Car_Menu_GetNode(int16_t index)
- *       —— 按索引取节点只读指针。
- *   int16_t Car_Menu_NodeCount(void)
- *       —— 节点总数（不含空索引）。
- *   static uint8_t menu_valid_index(int16_t index)
- *       —— 判断节点索引是否有效。
- *   static uint8_t menu_in_child_list(int16_t parent, int16_t node)
- *       —— 判断节点是否位于父节点的 child 子链表。
+ *   static void menu_reset_params(void)
+ *       —— 恢复菜单参数的默认值。
+ *   uint8_t Car_Menu_BuildLink(void)
+ *       —— 按 MenuTable[].parent_id 建立父子关系和环形同级链。
  *   uint8_t Car_Menu_ValidateLinks(void)
- *       —— 检查 next/prev、parent/child、branch/merge、pid_link 和
- *          pid_page 的建链一致性。
+ *       —— 检查建链是否闭合。
  *   uint16_t Car_Menu_LinkErrorCount(void)
- *       —— 返回最近一次建链自检的错误数。
- *   void Car_Menu_SetLap(CarMenuLap lap)
- *       —— 设置屏幕显示的圈次。
- *   CarMenuLap Car_Menu_GetLap(void)
- *       —— 读取屏幕显示的圈次。
- *
- * 执行上下文
- * ----------------------------------------------------------------------------
- *   Car_Menu_Init() 在主循环启动前调用一次；
- *   Car_Menu_Poll() 在主循环中每 5~10 ms 调用；
- *   本模块不修改电机、PID 或圈次执行状态，只维护菜单显示与导航。
+ *       —— 最近一次建链自检的错误数。
+ *   void Car_Menu_Init(void)
+ *       —— 初始化参数、建链、自检并初始化按键。
+ *   uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
+ *       —— 浏览/编辑状态机。
+ *   void Car_Menu_Poll(void)
+ *       —— 主循环周期任务。
+ *   void Car_Menu_Render(void)
+ *       —— 显示入口（暂时空实现）。
+ *   uint8_t Car_Menu_Goto(MenuID id)
+ *       —— 跳转到指定节点。
+ *   MenuID Car_Menu_GetPageId(void)
+ *       —— 当前页面编号。
+ *   MenuID Car_Menu_GetSelectedId(void)
+ *       —— 当前选中项编号。
+ *   uint8_t Car_Menu_IsEditing(void)
+ *       —— 是否处于编辑模式。
+ *   int32_t Car_Menu_GetEditValue(void)
+ *       —— 当前编辑值。
+ *   void Car_Menu_SetEditValue(int32_t value)
+ *       —— 设置编辑值并按范围限幅。
+ *   const MenuConfig *Car_Menu_GetConfig(MenuID id)
+ *       —— 取节点静态配置。
+ *   int16_t Car_Menu_NodeCount(void)
+ *       —— 节点总数。
  * ============================================================================
  */
 
 #include "NEUQ_lib_include.h"
-
 #include "Car_menu.h"
 #include "key.h"
 
-/*
- * 节点索引。
- * 0 保留为空索引，因此指定初始化器里省略的链接字段默认就是“无”。
- * 编号与《NEUQ智能车校赛链表式目录》保持一致。
- */
-enum
-{
-    N01 = 1, N02, N03, N04, N05, N06, N07, N08, N09, N10,
-    N11, N12, N13, N14, N15, N16, N17,
-
-    S01, S02, S03, S04, S05, S06, S07, S08, S09,
-
-    O01, O02, O03, O04, O05, O06, O07, O08,
-
-    P01, P02, P03, P04, P05, P06, P07, P08, P09, P10, P11, P12, P13,
-
-    B01, B02, B03, B04, B05, B06,
-
-    CAR_MENU_NODE_COUNT
-};
-
-/* 四个一级目录的入口节点，顺序与 CarMenuCategory 一致。 */
-static const int16_t category_head[CAR_MENU_CAT_COUNT] =
-{
-    S01,    /* 数独 */
-    O01,    /* 香橙派 */
-    N01,    /* 赛题元素PID：主链入口 */
-    B01     /* 电池电压显示 */
-};
-
 /* ========================================================================== */
-/*                          建链表（静态链接）                                 */
+/*                              可编辑参数                                     */
 /* ========================================================================== */
 
+CarMenuParams car_menu_params;
+
+/* ========================================================================== */
+/*                              静态配置表                                     */
+/* ========================================================================== */
+
+#define MENU_ITEM(name_, parent_, value_, min_, max_, step_, type_, skip_, lap_, score_, kalman_, status_, link_) \
+    { (name_), (parent_), (value_), (min_), (max_), (step_), (type_), (skip_), (lap_), (score_), (kalman_), (status_), (link_) }
+
 /*
- * 建链方式
- * ----------------------------------------------------------------------------
- * 本模块不申请堆内存，也不在运行时修补指针。链表的“建链”发生在这张只读
- * 节点表的指定初始化器里：
+ * 建链数据源：
+ *   parent_id 决定父子关系；
+ *   MENU_COUNT 的枚举顺序决定同级节点的初始排列顺序；
+ *   value 非空表示该页面可以直接编辑参数。
  *
- *   - 数组下标 0 保留为 CAR_MENU_INDEX_NONE，所有省略的链接字段自然为 0；
- *   - prev/next 建立同级双向链；
- *   - parent/child 建立页面层级：child 是子链表的入口；
- *   - branch_to/merge_to 建立事件分支与汇合点；
- *   - pid_link 建立跨一级目录的双向链接；
- *   - pid_page 给 P01~P13 编号，供 PID 页索引使用。
- *
- * 主链建链顺序
- * ----------------------------------------------------------------------------
- *   N01→N02→…→N06→N07；N07.next=N11 表示模板主链跳过颜色分支；
- *   N07.child=N08 挂出路障子链 N08→N09→N10，三者 merge_to=N11；
- *   N11→N12→…→N17；N17.next=P01；P01→P02→…→P13。
- *   四条一级目录链分别以 S01、O01、N01、B01 为入口。
- *
- * 建链自检
- * ----------------------------------------------------------------------------
- *   Car_Menu_ValidateLinks() 会检查 next/prev 互逆、parent/child 包含关系、
- *   branch_to/merge_to/pid_link 目标、pid_page 唯一性和四个目录入口。
- *   修改本表后应先跑一次自检，再上电联调。
- *
- * 修改约定
- * ----------------------------------------------------------------------------
- *   只写非默认字段；C99 指定初始化器会把未写字段清零，即“无链接”。
- *   需要修改链接时只改 prev/next/branch_to/merge_to/parent/child/pid_link。
+ * 主链层级：
+ *   MAIN -> CAT_* -> 竞赛节点；
+ *   N07 -> N08/N09/N10 构成路障颜色分支子链；
+ *   CAT_PID 的同级顺序为 N01..N07、N11..N17、P01..P13。
  */
-static const CarMenuNode car_menu_nodes[CAR_MENU_NODE_COUNT] =
+static const MenuConfig MenuTable[MENU_COUNT] =
 {
-    /* ---------------- 主链：发车到结算 ---------------- */
-    [N01] = {
-        .id = "N01", .name = "发车启动", .label = "START",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .next = N02
-    },
-    [N02] = {
-        .id = "N02", .name = "第一圈竞速计时", .label = "LAP1 TIME",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = N01, .next = N03, .pid_link = P12
-    },
-    [N03] = {
-        .id = "N03", .name = "直道/弯道巡线", .label = "TRACK",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TOPOLOGY, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 0,
-        .prev = N02, .next = N04, .pid_link = P01
-    },
-    [N04] = {
-        .id = "N04", .name = "十字路口通行", .label = "CROSS",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TOPOLOGY, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = N03, .next = N05, .pid_link = P04
-    },
-    [N05] = {
-        .id = "N05", .name = "环岛进入/出环", .label = "RING",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TOPOLOGY, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 45,
-        .prev = N04, .next = N06, .pid_link = P03
-    },
-    [N06] = {
-        .id = "N06", .name = "160cm断路通过", .label = "160CM GAP",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TOPOLOGY, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = CAR_MENU_SCORE_INVALID,
-        .prev = N05, .next = N07, .pid_link = P06
-    },
-    [N07] = {
-        .id = "N07", .name = "三色路障事件检测", .label = "BLOCK DETECT",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = N06, .next = N11, .branch_to = N08, .merge_to = N11,
-        .child = N08, .pid_link = P13
-    },
-    [N08] = {
-        .id = "N08", .name = "绿色路障直通", .label = "GREEN PASS",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 10,
-        .next = N09, .merge_to = N11, .parent = N07, .pid_link = P07
-    },
-    [N09] = {
-        .id = "N09", .name = "黄色路障绕行", .label = "YELLOW DETOUR",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_PENALTY,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 10,
-        .prev = N08, .next = N10, .merge_to = N11, .parent = N07, .pid_link = P08
-    },
-    [N10] = {
-        .id = "N10", .name = "红色路障第一圈忽略", .label = "RED L1 PASS",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_PENALTY,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 10,
-        .prev = N09, .merge_to = N11, .parent = N07, .pid_link = P09
-    },
-    [N11] = {
-        .id = "N11", .name = "第一圈计时结束", .label = "LAP1 END",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = N07, .next = N12, .pid_link = P12
-    },
-    [N12] = {
-        .id = "N12", .name = "第二圈低速开始", .label = "LAP2 LOW",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = N11, .next = N13, .pid_link = P12
-    },
-    [N13] = {
-        .id = "N13", .name = "红色路障第二圈停车5s", .label = "RED L2 STOP5",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_PENALTY,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 10,
-        .prev = N12, .next = N14, .pid_link = P09
-    },
-    [N14] = {
-        .id = "N14", .name = "数独采集/拼接/显示", .label = "SUDOKU",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_SCORE,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = N13, .next = N15, .pid_link = P10
-    },
-    [N15] = {
-        .id = "N15", .name = "软件盲盒", .label = "BLIND BOX",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_PENALTY,
-        .skippable = CAR_MENU_SKIP_PARTIAL, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_SITE, .status = CAR_MENU_STATUS_SITE,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 20,
-        .prev = N14, .next = N16, .pid_link = P11
-    },
-    [N16] = {
-        .id = "N16", .name = "真正停车点", .label = "REAL STOP",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_BASIC,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_SITE, .status = CAR_MENU_STATUS_SITE,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = N15, .next = N17, .pid_link = P11
-    },
-    [N17] = {
-        .id = "N17", .name = "结算/成绩判定", .label = "SCORE",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = N16, .next = P01
-    },
+    [MAIN] = MENU_ITEM("MAIN", MENU_NONE, NULL, 0, 0, 0,
+                       CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                       0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+
+    [CAT_SUDOKU] = MENU_ITEM("SUDOKU", MAIN, NULL, 0, 0, 0,
+                             CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                             0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [CAT_ORANGEPI] = MENU_ITEM("ORANGE PI", MAIN, NULL, 0, 0, 0,
+                               CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                               0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [CAT_PID] = MENU_ITEM("RACE PID", MAIN, NULL, 0, 0, 0,
+                          CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                          0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [CAT_BATTERY] = MENU_ITEM("BATTERY", MAIN, NULL, 0, 0, 0,
+                              CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                              0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
 
     /* ---------------- 一级目录：数独 ---------------- */
-    [S01] = {
-        .id = "S01", .name = "数独任务总览", .label = "SUDOKU OV",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_SCORE,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .next = S02, .pid_link = P10
-    },
-    [S02] = {
-        .id = "S02", .name = "四份子块采集", .label = "TILE CAPTURE",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S01, .next = S03, .pid_link = P10
-    },
-    [S03] = {
-        .id = "S03", .name = "Tag36h11 0~7定位与校验", .label = "TAG CHECK",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S02, .next = S04, .pid_link = P10
-    },
-    [S04] = {
-        .id = "S04", .name = "四子块拼接", .label = "STITCH",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S03, .next = S05, .pid_link = P10
-    },
-    [S05] = {
-        .id = "S05", .name = "6x6数独求解补全", .label = "SOLVE",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S04, .next = S06, .pid_link = P10
-    },
-    [S06] = {
-        .id = "S06", .name = "屏幕显示完整答案", .label = "DISPLAY",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S05, .next = S07, .pid_link = P10
-    },
-    [S07] = {
-        .id = "S07", .name = "数独完成-25s奖励判定", .label = "REWARD -25S",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_SCORE,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = -25,
-        .prev = S06, .next = S08, .pid_link = P10
-    },
-    [S08] = {
-        .id = "S08", .name = "数独主动屏蔽与无奖励", .label = "MASK NO REWARD",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = S07, .next = S09, .pid_link = P10
-    },
-    [S09] = {
-        .id = "S09", .name = "数独视觉流程PID链接", .label = "SUDOKU PID",
-        .category = CAR_MENU_CAT_SUDOKU, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = S08, .pid_link = P10
-    },
+    [S01] = MENU_ITEM("SUDOKU OV", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S02] = MENU_ITEM("TILE CAPTURE", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S03] = MENU_ITEM("TAG CHECK", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S04] = MENU_ITEM("STITCH", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S05] = MENU_ITEM("SOLVE", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S06] = MENU_ITEM("DISPLAY", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S07] = MENU_ITEM("REWARD -25S", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S08] = MENU_ITEM("MASK NO REWARD", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P10),
+    [S09] = MENU_ITEM("SUDOKU PID", CAT_SUDOKU, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
 
     /* ---------------- 一级目录：香橙派 ---------------- */
-    [O01] = {
-        .id = "O01", .name = "香橙派与核心板型号约束", .label = "BOARD LIMIT",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_HARDWARE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .next = O02
-    },
-    [O02] = {
-        .id = "O02", .name = "摄像头选型与连接", .label = "CAMERA",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_HARDWARE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = O01, .next = O03
-    },
-    [O03] = {
-        .id = "O03", .name = "图像采集管线", .label = "PIPELINE",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = O02, .next = O04, .pid_link = P10
-    },
-    [O04] = {
-        .id = "O04", .name = "算力分配与任务调度", .label = "SCHEDULER",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = O03, .next = O05
-    },
-    [O05] = {
-        .id = "O05", .name = "代码部署与现场调试", .label = "DEPLOY",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = O04, .next = O06
-    },
-    [O06] = {
-        .id = "O06", .name = "与PID/卡尔曼数据流", .label = "DATA FLOW",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = O05, .next = O07, .pid_link = P12
-    },
-    [O07] = {
-        .id = "O07", .name = "日志与故障排查", .label = "LOG",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = O06, .next = O08
-    },
-    [O08] = {
-        .id = "O08", .name = "香橙派现场TBD", .label = "SITE TBD",
-        .category = CAR_MENU_CAT_ORANGEPI, .type = CAR_MENU_TYPE_TBD,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_SITE, .status = CAR_MENU_STATUS_TBD,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = O07
-    },
+    [O01] = MENU_ITEM("BOARD LIMIT", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [O02] = MENU_ITEM("CAMERA", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [O03] = MENU_ITEM("PIPELINE", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [O04] = MENU_ITEM("SCHEDULER", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [O05] = MENU_ITEM("DEPLOY", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [O06] = MENU_ITEM("DATA FLOW", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
+    [O07] = MENU_ITEM("LOG", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [O08] = MENU_ITEM("SITE TBD", CAT_ORANGEPI, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_TBD, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_TBD, MENU_NONE),
 
     /* ---------------- 一级目录：赛题元素PID ---------------- */
-    [P01] = {
-        .id = "P01", .name = "巡线转向控制页", .label = "PID STEER",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 0,
-        .prev = N17, .next = P02, .pid_page = 1
-    },
-    [P02] = {
-        .id = "P02", .name = "速度闭环控制页", .label = "PID SPEED",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = P01, .next = P03, .pid_page = 2
-    },
-    [P03] = {
-        .id = "P03", .name = "环岛进入/出环控制页", .label = "PID RING",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 0,
-        .prev = P02, .next = P04, .pid_page = 3
-    },
-    [P04] = {
-        .id = "P04", .name = "十字路口通行控制页", .label = "PID CROSS",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = P03, .next = P05, .pid_page = 4
-    },
-    [P05] = {
-        .id = "P05", .name = "锥桶内侧避撞控制页", .label = "PID CONE",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_TBD,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 15,
-        .prev = P04, .next = P06, .pid_page = 5
-    },
-    [P06] = {
-        .id = "P06", .name = "160cm断路通过控制页", .label = "PID GAP",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VISION, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = P05, .next = P07, .pid_page = 6
-    },
-    [P07] = {
-        .id = "P07", .name = "绿色路障直通页", .label = "PID GREEN",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = P06, .next = P08, .pid_page = 7
-    },
-    [P08] = {
-        .id = "P08", .name = "黄色路障绕行页", .label = "PID YELLOW",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_FIRST,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_YES, .score_s = 0,
-        .prev = P07, .next = P09, .pid_page = 8
-    },
-    [P09] = {
-        .id = "P09", .name = "红色路障第二圈停车5s页", .label = "PID RED STOP",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = P08, .next = P10, .pid_page = 9
-    },
-    [P10] = {
-        .id = "P10", .name = "数独采集/拼接/显示流程页", .label = "PID SUDOKU",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_YES, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_TAG, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = P09, .next = P11, .pid_page = 10
-    },
-    [P11] = {
-        .id = "P11", .name = "软件盲盒与真正停车点页", .label = "PID BLIND",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_PARTIAL, .lap = CAR_MENU_LAP_SECOND,
-        .trigger = CAR_MENU_TRIG_SITE, .status = CAR_MENU_STATUS_SITE,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = P10, .next = P12, .pid_page = 11
-    },
-    [P12] = {
-        .id = "P12", .name = "第一圈/第二圈状态切换与安全联锁页", .label = "PID STATE",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_TIMER, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = P11, .next = P13, .pid_page = 12
-    },
-    [P13] = {
-        .id = "P13", .name = "路障检测与颜色分支调度页", .label = "PID DISPATCH",
-        .category = CAR_MENU_CAT_PID, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_COLOR, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = P12, .pid_page = 13
-    },
+    [N01] = MENU_ITEM("START", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [N02] = MENU_ITEM("LAP1 TIME", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P12),
+    [N03] = MENU_ITEM("TRACK", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, P01),
+    [N04] = MENU_ITEM("CROSS", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P04),
+    [N05] = MENU_ITEM("RING", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      45, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, P03),
+    [N06] = MENU_ITEM("160CM GAP", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      CAR_MENU_SCORE_INVALID, CAR_MENU_KALMAN_INDIRECT,
+                      CAR_MENU_STATUS_CONFIRMED, P06),
+    [N07] = MENU_ITEM("BLOCK DETECT", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P13),
+    [N08] = MENU_ITEM("GREEN PASS", N07, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P07),
+    [N09] = MENU_ITEM("YELLOW DETOUR", N07, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P08),
+    [N10] = MENU_ITEM("RED L1 PASS", N07, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P09),
+    [N11] = MENU_ITEM("LAP1 END", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P12),
+    [N12] = MENU_ITEM("LAP2 LOW", CAT_PID, &car_menu_params.speed_limit, 0, 500, 5,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
+    [N13] = MENU_ITEM("RED L2 STOP5", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
+                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P09),
+    [N14] = MENU_ITEM("SUDOKU", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
+    [N15] = MENU_ITEM("BLIND BOX", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_PARTIAL, CAR_MENU_LAP_SECOND,
+                      20, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, P11),
+    [N16] = MENU_ITEM("REAL STOP", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, P11),
+    [N17] = MENU_ITEM("SCORE", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+
+    /* ---------------- 一级目录：赛题元素PID 的 PID 页 ---------------- */
+    [P01] = MENU_ITEM("PID STEER", CAT_PID, &car_menu_params.pid_kp, 0, 65535, 1,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P02] = MENU_ITEM("PID SPEED", CAT_PID, &car_menu_params.pid_ki, 0, 65535, 1,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P03] = MENU_ITEM("PID RING", CAT_PID, &car_menu_params.ring_speed, 0, 500, 5,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P04] = MENU_ITEM("PID CROSS", CAT_PID, &car_menu_params.kalman_q, 0, 100000, 10,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P05] = MENU_ITEM("PID CONE", CAT_PID, &car_menu_params.cone_offset, 0, 500, 5,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      15, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_TBD, MENU_NONE),
+    [P06] = MENU_ITEM("PID GAP", CAT_PID, &car_menu_params.gap_speed, 0, 500, 5,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P07] = MENU_ITEM("PID GREEN", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P08] = MENU_ITEM("PID YELLOW", CAT_PID, &car_menu_params.kalman_r, 0, 100000, 10,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
+                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P09] = MENU_ITEM("PID RED STOP", CAT_PID, &car_menu_params.red_stop_s, 1, 10, 1,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P10] = MENU_ITEM("PID SUDOKU", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P11] = MENU_ITEM("PID BLIND", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_PARTIAL, CAR_MENU_LAP_SECOND,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, MENU_NONE),
+    [P12] = MENU_ITEM("PID STATE", CAT_PID, &car_menu_params.lap_mode, 0, 1, 1,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [P13] = MENU_ITEM("PID DISPATCH", CAT_PID, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
 
     /* ---------------- 一级目录：电池电压显示 ---------------- */
-    [B01] = {
-        .id = "B01", .name = "电压采集与分压电路", .label = "DIVIDER",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_HARDWARE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_MANUAL, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .next = B02
-    },
-    [B02] = {
-        .id = "B02", .name = "ADC采样与滤波", .label = "ADC FILTER",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VOLTAGE, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = B01, .next = B03
-    },
-    [B03] = {
-        .id = "B03", .name = "屏幕电压显示", .label = "VOLT DISPLAY",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VOLTAGE, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = B02, .next = B04
-    },
-    [B04] = {
-        .id = "B04", .name = "低电压报警/降速/安全联锁", .label = "LOW VOLT SAFE",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_RULE,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VOLTAGE, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = B03, .next = B05, .pid_link = P12
-    },
-    [B05] = {
-        .id = "B05", .name = "与赛题元素PID安全联锁链接", .label = "SAFETY LINK",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_FLOW,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_VOLTAGE, .status = CAR_MENU_STATUS_CONFIRMED,
-        .kalman = CAR_MENU_KALMAN_INDIRECT, .score_s = 0,
-        .prev = B04, .next = B06, .pid_link = P12
-    },
-    [B06] = {
-        .id = "B06", .name = "电池电压现场TBD", .label = "SITE TBD",
-        .category = CAR_MENU_CAT_BATTERY, .type = CAR_MENU_TYPE_TBD,
-        .skippable = CAR_MENU_SKIP_NO, .lap = CAR_MENU_LAP_BOTH,
-        .trigger = CAR_MENU_TRIG_SITE, .status = CAR_MENU_STATUS_TBD,
-        .kalman = CAR_MENU_KALMAN_NO, .score_s = 0,
-        .prev = B05
-    }
+    [B01] = MENU_ITEM("DIVIDER", CAT_BATTERY, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [B02] = MENU_ITEM("ADC FILTER", CAT_BATTERY, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [B03] = MENU_ITEM("VOLT DISPLAY", CAT_BATTERY, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
+    [B04] = MENU_ITEM("LOW VOLT SAFE", CAT_BATTERY, &car_menu_params.battery_low,
+                      5000, 12600, 100,
+                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
+    [B05] = MENU_ITEM("SAFETY LINK", CAT_BATTERY, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
+    [B06] = MENU_ITEM("SITE TBD", CAT_BATTERY, NULL, 0, 0, 0,
+                      CAR_MENU_TYPE_TBD, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
+                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_TBD, MENU_NONE)
 };
 
 /* ========================================================================== */
-/*                           菜单单例与 LCD 文本表                             */
+/*                              运行时节点                                     */
 /* ========================================================================== */
 
-/* 菜单单例。 */
-static CarMenu menu;
-
-/* 最近一次建链自检发现的错误数，供调试和页面显示使用。 */
-static uint16_t menu_link_errors;
-
-#if CAR_MENU_USE_LCD
-/* LCD 显示用的枚举文本。 */
-static const char *const category_text[CAR_MENU_CAT_COUNT] =
+typedef struct MenuNode
 {
-    "SUDOKU", "ORANGE PI", "RACE PID", "BATTERY"
-};
+    const MenuConfig *info;  /* 节点静态配置 */
+    struct MenuNode *parent; /* 父节点 */
+    struct MenuNode *child;  /* 第一个子节点 */
+    struct MenuNode *prev;   /* 同级前驱（环形） */
+    struct MenuNode *next;   /* 同级后继（环形） */
+} MenuNode;
 
-static const char *const type_text[CAR_MENU_TYPE_FLOW + 1] =
-{
-    "BASIC", "SCORE", "PENALTY", "RULE", "HARDWARE", "TBD", "FLOW"
-};
-
-static const char *const skip_text[CAR_MENU_SKIP_PARTIAL + 1] =
-{
-    "NO", "YES", "PART"
-};
-
-static const char *const lap_text[CAR_MENU_LAP_BOTH + 1] =
-{
-    "LAP1", "LAP2", "BOTH"
-};
-
-static const char *const trigger_text[CAR_MENU_TRIG_MANUAL + 1] =
-{
-    "TOPO", "VISION", "COLOR", "TAG", "SITE", "TIMER", "VOLT", "MANUAL"
-};
-
-static const char *const status_text[CAR_MENU_STATUS_TBD + 1] =
-{
-    "CONFIRMED", "SITE", "TBD"
-};
-
-static const char *const kalman_text[CAR_MENU_KALMAN_INDIRECT + 1] =
-{
-    "NO", "YES", "INDIRECT"
-};
-#endif
-
-/* -------------------------------------------------------------------------- */
-/*                              内部辅助函数                                   */
-/* -------------------------------------------------------------------------- */
-
-#if CAR_MENU_USE_LCD
-/*
- * 函数名称：menu_enum_text
- * 函数功能：按枚举值从只读文本表中取字符串，避免坏索引读越界。
- * 参数说明：table —— 文本表指针；
- *           count —— 文本表项数；
- *           value —— 待查的枚举值。
- * 返回参数：对应文本；越界返回 "?"。
- * 使用示例：
- *     const char *text = menu_enum_text(type_text, CAR_MENU_TYPE_FLOW + 1,
- *                                       node->type);
- * 备注信息：仅在本文件的绘制函数中使用。
- */
-static const char *menu_enum_text(const char *const *table, unsigned count,
-                                  unsigned value)
-{
-    return (value < count) ? table[value] : "?";
-}
-
-/*
- * 函数名称：menu_index_id
- * 函数功能：把节点索引转换成节点 ID 文本，供 LCD 显示链接字段。
- * 参数说明：index  —— 节点索引，0 表示空；
- *           buffer —— 输出缓冲区；
- *           size   —— 缓冲区字节数。
- * 返回参数：buffer 指针。
- * 使用示例：
- *     char text[8];
- *     menu_index_id(node->next, text, sizeof(text));
- * 备注信息：空索引或越界时写入 "-"，保证调用者总能拿到可显示文本。
- */
-static const char *menu_index_id(int16_t index, char *buffer, size_t size)
-{
-    if (index > CAR_MENU_INDEX_NONE && index < CAR_MENU_NODE_COUNT)
-    {
-        snprintf(buffer, size, "%s", car_menu_nodes[index].id);
-    }
-    else
-    {
-        snprintf(buffer, size, "-");
-    }
-
-    return buffer;
-}
-
-/*
- * 函数名称：menu_score_text
- * 函数功能：把节点的罚时/奖励数值格式化成 LCD 可显示的 ASCII 文本。
- * 参数说明：score  —— 分数，正数罚时、负数奖励、CAR_MENU_SCORE_INVALID 无效；
- *           buffer —— 输出缓冲区；
- *           size   —— 缓冲区字节数。
- * 返回参数：无。
- * 使用示例：
- *     char text[12];
- *     menu_score_text(node->score_s, text, sizeof(text));
- * 备注信息：输出 "+10S"、"-25S"、"0S" 或 "INVALID"。
- */
-static void menu_score_text(int16_t score, char *buffer, size_t size)
-{
-    if (score == CAR_MENU_SCORE_INVALID)
-    {
-        snprintf(buffer, size, "INVALID");
-    }
-    else if (score < 0)
-    {
-        snprintf(buffer, size, "%dS", (int)score);
-    }
-    else if (score > 0)
-    {
-        snprintf(buffer, size, "+%dS", (int)score);
-    }
-    else
-    {
-        snprintf(buffer, size, "0S");
-    }
-}
-
-/*
- * 函数名称：menu_pid_text
- * 函数功能：把 PID 页编号格式化成 "PID-xx" 文本。
- * 参数说明：page   —— PID 页编号 1~13，0 表示非 PID 页；
- *           buffer —— 输出缓冲区；
- *           size   —— 缓冲区字节数。
- * 返回参数：无。
- * 使用示例：
- *     char text[12];
- *     menu_pid_text(node->pid_page, text, sizeof(text));
- * 备注信息：page = 0 时输出 "-"。
- */
-static void menu_pid_text(uint8_t page, char *buffer, size_t size)
-{
-    if (page == 0U)
-    {
-        snprintf(buffer, size, "-");
-    }
-    else
-    {
-        snprintf(buffer, size, "PID-%02u", (unsigned)page);
-    }
-}
-#endif  /* CAR_MENU_USE_LCD */
+static MenuNode nodes[MENU_COUNT]; /* 固定内存，不申请堆 */
+static MenuNode *page;              /* 当前页面 */
+static MenuNode *selected;          /* 当前选中项，永远是 page 的子节点 */
+static uint8_t editing;             /* 0 浏览，1 编辑 */
+static int32_t edit_value;          /* 编辑中的临时值 */
+static uint16_t menu_link_errors;   /* 建链自检错误数 */
 
 /* ========================================================================== */
-/*                              菜单导航状态机                                 */
+/*                              内部函数                                       */
 /* ========================================================================== */
 
 /*
- * 函数名称：menu_push
- * 函数功能：把当前节点索引压入返回栈，供 menu_back() 使用。
- * 参数说明：index —— 待压入的节点索引。
+ * 函数名称：menu_reset_params
+ * 函数功能：恢复菜单可编辑参数的默认值。
+ * 参数说明：无。
  * 返回参数：无。
  * 使用示例：
- *     menu_push(menu.current);
- * 备注信息：栈满时丢弃最旧的一项，保证最近一次进入点一定可返回。
+ *     menu_reset_params();
+ * 备注信息：这些值只是菜单侧的初始值；控制层是否采用由上层决定。
  */
-static void menu_push(int16_t index)
+static void menu_reset_params(void)
 {
-    if (menu.depth >= CAR_MENU_STACK_DEPTH)
-    {
-        memmove(&menu.stack[0], &menu.stack[1],
-                (CAR_MENU_STACK_DEPTH - 1U) * sizeof(menu.stack[0]));
-        menu.depth = (uint8_t)(CAR_MENU_STACK_DEPTH - 1U);
-    }
-
-    menu.stack[menu.depth] = index;
-    menu.depth++;
+    car_menu_params.pid_kp = 200;       /* 2.00 */
+    car_menu_params.pid_ki = 12;        /* 0.12 */
+    car_menu_params.pid_kd = 0;
+    car_menu_params.kalman_q = 100;     /* 0.100 */
+    car_menu_params.kalman_r = 1000;    /* 1.000 */
+    car_menu_params.lap_mode = 0;       /* 第一圈 */
+    car_menu_params.speed_limit = 180;  /* rpm */
+    car_menu_params.ring_speed = 120;   /* rpm */
+    car_menu_params.cone_offset = 150;  /* mm */
+    car_menu_params.red_stop_s = 5;     /* s */
+    car_menu_params.gap_speed = 160;    /* rpm */
+    car_menu_params.battery_low = 6600; /* mV */
 }
 
+/* ========================================================================== */
+/*                              建链与自检                                     */
+/* ========================================================================== */
+
 /*
- * 函数名称：menu_move
- * 函数功能：在当前同级链表中前后移动，到达表头/表尾时回绕。
- * 参数说明：direction —— 小于 0 向前（prev），大于 0 向后（next）。
- * 返回参数：无。
+ * 函数名称：Car_Menu_BuildLink
+ * 函数功能：按 MenuTable[].parent_id 建立父子关系和环形同级双向链表。
+ * 参数说明：无。
+ * 返回参数：1 成功；0 parent_id 非法或自引用。
  * 使用示例：
- *     menu_move(-1);  // 上一项
- *     menu_move(1);   // 下一项
- * 备注信息：子链表（如路障颜色分支）同样使用自身的 prev/next 回绕。
+ *     Car_Menu_BuildLink();
+ * 备注信息：节点内存固定为 nodes[MENU_COUNT]，不需要 malloc；
+ *           同级链首尾相接，UP/DOWN 到头自动回绕。
  */
-static void menu_move(int8_t direction)
+uint8_t Car_Menu_BuildLink(void)
 {
-    const CarMenuNode *node = Car_Menu_CurrentNode();
-    int16_t target = (direction < 0) ? node->prev : node->next;
+    uint16_t errors = 0U;
+    int i;
 
-    if (target == CAR_MENU_INDEX_NONE)
+    for (i = 0; i < MENU_COUNT; i++)
     {
-        target = menu.current;
+        nodes[i].info = &MenuTable[i];
+        nodes[i].parent = NULL;
+        nodes[i].child = NULL;
+        nodes[i].prev = NULL;
+        nodes[i].next = NULL;
+    }
 
-        if (direction < 0)
+    for (i = 0; i < MENU_COUNT; i++)
+    {
+        MenuID parent_id = MenuTable[i].parent_id;
+        MenuNode *node;
+        MenuNode *parent;
+        MenuNode *first;
+        MenuNode *last;
+
+        if (parent_id == MENU_NONE)
         {
-            /* 在表头继续向上：绕到表尾。 */
-            while (car_menu_nodes[target].next != CAR_MENU_INDEX_NONE)
-            {
-                target = car_menu_nodes[target].next;
-            }
+            continue;
+        }
+
+        if (parent_id < 0 || parent_id >= MENU_COUNT || (int)parent_id == i)
+        {
+            errors++;
+            continue;
+        }
+
+        node = &nodes[i];
+        parent = &nodes[parent_id];
+        node->parent = parent;
+
+        first = parent->child;
+        if (first == NULL)
+        {
+            parent->child = node;
+            node->prev = node;
+            node->next = node;
         }
         else
         {
-            /* 在表尾继续向下：绕到表头。 */
-            while (car_menu_nodes[target].prev != CAR_MENU_INDEX_NONE)
-            {
-                target = car_menu_nodes[target].prev;
-            }
+            last = first->prev;
+            node->prev = last;
+            last->next = node;
+            node->next = first;
+            first->prev = node;
         }
     }
 
-    if (target != menu.current)
-    {
-        (void)Car_Menu_Goto(target);
-    }
-}
-
-/*
- * 函数名称：menu_switch_category
- * 函数功能：按固定顺序切换一级目录，并跳到该类入口节点。
- * 参数说明：direction —— -1 上一类，+1 下一类。
- * 返回参数：无。
- * 使用示例：
- *     menu_switch_category(1);  // 数独 -> 香橙派 -> 赛题元素PID -> 电池
- * 备注信息：切换时清空返回栈；四个一级目录按 CarMenuCategory 顺序回绕。
- */
-static void menu_switch_category(int8_t direction)
-{
-    int category = (int)menu.category + CAR_MENU_CAT_COUNT + direction;
-
-    category %= CAR_MENU_CAT_COUNT;
-    menu.depth = 0;
-    (void)Car_Menu_Goto(category_head[category]);
-}
-
-/*
- * 函数名称：menu_home
- * 函数功能：清空返回栈并回到当前一级目录的入口节点。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_home();  // 长按 UP/DOWN 时调用
- * 备注信息：入口节点由 category_head[menu.category] 决定。
- */
-static void menu_home(void)
-{
-    menu.depth = 0;
-    (void)Car_Menu_Goto(category_head[menu.category]);
-}
-
-/*
- * 函数名称：menu_enter
- * 函数功能：进入当前节点的子链表；没有 child 时跳到跨目录 pid_link。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_enter();  // OK 单击时调用
- * 备注信息：跳转前把当前节点压入返回栈；两者都没有时保持原页面。
- */
-static void menu_enter(void)
-{
-    const CarMenuNode *node = Car_Menu_CurrentNode();
-    int16_t target = node->child;
-
-    if (target == CAR_MENU_INDEX_NONE)
-    {
-        target = node->pid_link;
-    }
-
-    if (target != CAR_MENU_INDEX_NONE)
-    {
-        menu_push(menu.current);
-        (void)Car_Menu_Goto(target);
-    }
-}
-
-/*
- * 函数名称：menu_back
- * 函数功能：返回上一个进入点；返回栈为空时回到当前一级目录入口。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_back();  // OK 双击时调用
- * 备注信息：返回操作不再压栈，避免来回跳转时栈无限增长。
- */
-static void menu_back(void)
-{
-    if (menu.depth > 0U)
-    {
-        menu.depth--;
-        (void)Car_Menu_Goto(menu.stack[menu.depth]);
-    }
-    else
-    {
-        (void)Car_Menu_Goto(category_head[menu.category]);
-    }
-}
-
-/*
- * 函数名称：menu_toggle_lap
- * 函数功能：在第一圈/第二圈显示状态之间切换。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_toggle_lap();  // 长按 OK 时调用
- * 备注信息：只改变菜单显示和 Car_Menu_GetLap() 的返回值，不改变底盘
- *           执行状态；圈次执行仍由上层状态机负责。
- */
-static void menu_toggle_lap(void)
-{
-    menu.lap = (menu.lap == CAR_MENU_LAP_FIRST)
-             ? CAR_MENU_LAP_SECOND
-             : CAR_MENU_LAP_FIRST;
-    menu.dirty = 1U;
-}
-
-/*
- * 函数名称：menu_dispatch_key
- * 函数功能：把一个按键事件映射为菜单动作。
- * 参数说明：id    —— 按键编号（UP/DOWN/OK）；
- *           event —— 按键事件（单击/双击/长按/重复）。
- * 返回参数：无。
- * 使用示例：
- *     menu_dispatch_key(KEY_OK, KEY_EVENT_DOUBLE_CLICK);
- * 备注信息：导航约定见 Car_menu.h；PRESS/RELEASE 不产生菜单动作。
- */
-static void menu_dispatch_key(Key_Id id, Key_Event event)
-{
-    switch (id)
-    {
-        case KEY_UP:
-            switch (event)
-            {
-                case KEY_EVENT_SINGLE_CLICK:
-                case KEY_EVENT_REPEAT:
-                    menu_move(-1);
-                    break;
-
-                case KEY_EVENT_DOUBLE_CLICK:
-                    menu_switch_category(-1);
-                    break;
-
-                case KEY_EVENT_LONG_PRESS:
-                    menu_home();
-                    break;
-
-                default:
-                    break;
-            }
-            break;
-
-        case KEY_DOWN:
-            switch (event)
-            {
-                case KEY_EVENT_SINGLE_CLICK:
-                case KEY_EVENT_REPEAT:
-                    menu_move(1);
-                    break;
-
-                case KEY_EVENT_DOUBLE_CLICK:
-                    menu_switch_category(1);
-                    break;
-
-                case KEY_EVENT_LONG_PRESS:
-                    menu_home();
-                    break;
-
-                default:
-                    break;
-            }
-            break;
-
-        case KEY_OK:
-            switch (event)
-            {
-                case KEY_EVENT_SINGLE_CLICK:
-                    menu_enter();
-                    break;
-
-                case KEY_EVENT_DOUBLE_CLICK:
-                    menu_back();
-                    break;
-
-                case KEY_EVENT_LONG_PRESS:
-                    menu_toggle_lap();
-                    break;
-
-                default:
-                    break;
-            }
-            break;
-
-        default:
-            break;
-    }
-}
-
-/*
- * 函数名称：menu_handle_keys
- * 函数功能：依次取出三个按键的全部待处理事件并分发。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_handle_keys();  // Car_Menu_Poll() 内部调用
- * 备注信息：使用 while 把队列排空，保证一次轮询处理完积压事件；
- *           事件队列为空后退出，不会阻塞。
- */
-static void menu_handle_keys(void)
-{
-    unsigned i;
-    Key_Event event;
-
-    for (i = 0; i < KEY_COUNT; i++)
-    {
-        while (Key_PollEvent((Key_Id)i, &event))
-        {
-            menu_dispatch_key((Key_Id)i, event);
-        }
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/*                              对外接口                                       */
-/* -------------------------------------------------------------------------- */
-
-/*
- * 函数名称：Car_Menu_Init
- * 函数功能：初始化按键和 LCD，定位到主链入口 N01 并绘制首屏。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     Car_Menu_Init();
- * 备注信息：内部调用 Key_Init() 和 NEUQ_LCD200_init()，含 HAL_Delay()，
- *           只能在主循环启动前调用，不能放在中断里。
- */
-void Car_Menu_Init(void)
-{
-    Key_Init();
-
-#if CAR_MENU_USE_LCD
-    NEUQ_LCD200_init();
-    NEUQ_LCD200_SetAsciiFont(&ASCII_Font16);
-    NEUQ_LCD200_SetBackColor(LCD_BLACK);
-    NEUQ_LCD200_SetPenColor(LCD_WHITE);
-    NEUQ_LCD200_Clear();
-#endif
-
-    menu.current = N01;
-    menu.depth = 0;
-    menu.category = (uint8_t)car_menu_nodes[N01].category;
-    menu.lap = CAR_MENU_LAP_FIRST;
-    menu.dirty = 0;
-    menu.link_fault = Car_Menu_ValidateLinks() ? 0U : 1U;
-
-    Car_Menu_Render();
-}
-
-/*
- * 函数名称：Car_Menu_Poll
- * 函数功能：周期扫描按键、处理按键事件，并在需要时重绘页面。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     while (1)
- *     {
- *         Car_Menu_Poll();
- *         // 其他主循环任务
- *     }
- * 备注信息：建议每 5~10 ms 调用一次；不得在中断中调用，也不得与
- *           Key_Scan() 的其他调用者并发。
- */
-void Car_Menu_Poll(void)
-{
-    Key_Scan(HAL_GetTick());
-    menu_handle_keys();
-
-#if CAR_MENU_USE_LCD
-    if (menu.dirty)
-    {
-        Car_Menu_Render();
-        menu.dirty = 0;
-    }
-#endif
-}
-
-/*
- * 函数名称：Car_Menu_Render
- * 函数功能：把当前节点的 ID、类型、屏蔽/圈次、得分、链接和状态绘制到 LCD。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     Car_Menu_Render();
- * 备注信息：CAR_MENU_USE_LCD = 0 时为空操作；中文 name 不上屏，屏幕使用
- *           ASCII label 和枚举文本，避免 LCD200 字库缺字。
- */
-void Car_Menu_Render(void)
-{
-#if CAR_MENU_USE_LCD
-    const CarMenuNode *node = Car_Menu_CurrentNode();
-    char line[40];
-    char score[12];
-    char pid[12];
-    char prev_id[8];
-    char next_id[8];
-    char branch_id[8];
-    char merge_id[8];
-    char parent_id[8];
-    char child_id[8];
-    char link_id[8];
-    uint16_t y = 0U;
-
-    NEUQ_LCD200_SetBackColor(LCD_BLACK);
-    NEUQ_LCD200_Clear();
-
-    /* 标题行使用不同颜色，便于快速定位。 */
-    NEUQ_LCD200_SetPenColor(LCD_CYAN);
-    NEUQ_LCD200_DisplayString(4U, y, (char *)"NEUQ CAR LINK MENU");
-    y += 18U;
-
-    NEUQ_LCD200_SetPenColor(LCD_WHITE);
-
-    snprintf(line, sizeof(line), "CAT %u/4: %s",
-             (unsigned)node->category + 1U,
-             menu_enum_text(category_text, CAR_MENU_CAT_COUNT,
-                            (unsigned)node->category));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "NODE: %s %s", node->id, node->label);
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "TYPE: %s",
-             menu_enum_text(type_text, CAR_MENU_TYPE_FLOW + 1,
-                            (unsigned)node->type));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "SKIP: %s  LAP: %s",
-             menu_enum_text(skip_text, CAR_MENU_SKIP_PARTIAL + 1,
-                            (unsigned)node->skippable),
-             menu_enum_text(lap_text, CAR_MENU_LAP_BOTH + 1,
-                            (unsigned)node->lap));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    menu_score_text(node->score_s, score, sizeof(score));
-    snprintf(line, sizeof(line), "SCORE: %s  KAL: %s", score,
-             menu_enum_text(kalman_text, CAR_MENU_KALMAN_INDIRECT + 1,
-                            (unsigned)node->kalman));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    menu_pid_text(node->pid_page, pid, sizeof(pid));
-    snprintf(line, sizeof(line), "PID PAGE: %s", pid);
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "STATUS: %s",
-             menu_enum_text(status_text, CAR_MENU_STATUS_TBD + 1,
-                            (unsigned)node->status));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "TRIGGER: %s",
-             menu_enum_text(trigger_text, CAR_MENU_TRIG_MANUAL + 1,
-                            (unsigned)node->trigger));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "PREV %s  NEXT %s",
-             menu_index_id(node->prev, prev_id, sizeof(prev_id)),
-             menu_index_id(node->next, next_id, sizeof(next_id)));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "BRANCH %s  MERGE %s",
-             menu_index_id(node->branch_to, branch_id, sizeof(branch_id)),
-             menu_index_id(node->merge_to, merge_id, sizeof(merge_id)));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "PARENT %s  CHILD %s",
-             menu_index_id(node->parent, parent_id, sizeof(parent_id)),
-             menu_index_id(node->child, child_id, sizeof(child_id)));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "LINK %s",
-             menu_index_id(node->pid_link, link_id, sizeof(link_id)));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    snprintf(line, sizeof(line), "MENU LAP: %s",
-             menu_enum_text(lap_text, CAR_MENU_LAP_BOTH + 1,
-                            (unsigned)menu.lap));
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    y += 18U;
-
-    NEUQ_LCD200_SetPenColor(LCD_GREY);
-    NEUQ_LCD200_DisplayString(4U, y, (char *)"OK=ENTER 2xOK=BACK");
-    y += 18U;
-    NEUQ_LCD200_DisplayString(4U, y, (char *)"HOLD OK=LAP 2xUP=CAT");
-    y += 18U;
-    NEUQ_LCD200_SetPenColor(menu.link_fault ? LCD_RED : LCD_GREEN);
-    snprintf(line, sizeof(line), "LINKCHECK: %s",
-             menu.link_fault ? "ERR" : "OK");
-    NEUQ_LCD200_DisplayString(4U, y, line);
-    NEUQ_LCD200_SetPenColor(LCD_WHITE);
-#else
-    menu.dirty = 0;
-#endif
-}
-
-/*
- * 函数名称：Car_Menu_Goto
- * 函数功能：跳转到指定索引的节点，并同步当前一级分类。
- * 参数说明：index —— 节点索引，必须大于 0 且小于节点总数。
- * 返回参数：1 成功；0 索引无效。
- * 使用示例：
- *     Car_Menu_Goto(P10);  // 跳到数独流程页
- * 备注信息：只改变菜单状态并置 dirty，不执行任何控制动作。
- */
-uint8_t Car_Menu_Goto(int16_t index)
-{
-    if (index <= CAR_MENU_INDEX_NONE || index >= CAR_MENU_NODE_COUNT)
-    {
-        return 0U;
-    }
-
-    menu.current = index;
-    menu.category = (uint8_t)car_menu_nodes[index].category;
-    menu.dirty = 1U;
-    return 1U;
-}
-
-/*
- * 函数名称：Car_Menu_GotoId
- * 函数功能：按节点 ID（如 "P10"）查找并跳转。
- * 参数说明：id —— 以 '\0' 结尾的节点 ID 字符串。
- * 返回参数：1 成功；0 参数为空或未找到。
- * 使用示例：
- *     Car_Menu_GotoId("N07");
- * 备注信息：线性查找 53 个节点，仅在初始化或调试跳转时使用。
- */
-uint8_t Car_Menu_GotoId(const char *id)
-{
-    int16_t i;
-
-    if (id == 0)
-    {
-        return 0U;
-    }
-
-    for (i = 1; i < CAR_MENU_NODE_COUNT; i++)
-    {
-        if (strcmp(car_menu_nodes[i].id, id) == 0)
-        {
-            return Car_Menu_Goto(i);
-        }
-    }
-
-    return 0U;
-}
-
-/*
- * 函数名称：Car_Menu_CurrentIndex
- * 函数功能：返回当前节点索引。
- * 参数说明：无。
- * 返回参数：当前节点索引。
- * 使用示例：
- *     int16_t index = Car_Menu_CurrentIndex();
- * 备注信息：索引 0 表示空；正常使用时始终指向有效节点。
- */
-int16_t Car_Menu_CurrentIndex(void)
-{
-    return menu.current;
-}
-
-/*
- * 函数名称：Car_Menu_CurrentNode
- * 函数功能：返回当前节点的只读指针。
- * 参数说明：无。
- * 返回参数：当前节点指针；索引异常时返回入口节点 N01。
- * 使用示例：
- *     const CarMenuNode *node = Car_Menu_CurrentNode();
- * 备注信息：返回值指向只读常量表，调用者不得写入。
- */
-const CarMenuNode *Car_Menu_CurrentNode(void)
-{
-    if (menu.current <= CAR_MENU_INDEX_NONE ||
-        menu.current >= CAR_MENU_NODE_COUNT)
-    {
-        return &car_menu_nodes[N01];
-    }
-
-    return &car_menu_nodes[menu.current];
-}
-
-/*
- * 函数名称：Car_Menu_GetNode
- * 函数功能：按索引返回节点的只读指针。
- * 参数说明：index —— 节点索引。
- * 返回参数：节点指针；索引无效返回 NULL。
- * 使用示例：
- *     const CarMenuNode *node = Car_Menu_GetNode(P10);
- * 备注信息：返回值指向只读常量表，调用者不得写入。
- */
-const CarMenuNode *Car_Menu_GetNode(int16_t index)
-{
-    if (index <= CAR_MENU_INDEX_NONE || index >= CAR_MENU_NODE_COUNT)
-    {
-        return 0;
-    }
-
-    return &car_menu_nodes[index];
-}
-
-/*
- * 函数名称：Car_Menu_NodeCount
- * 函数功能：返回节点总数（不含保留的空索引 0）。
- * 参数说明：无。
- * 返回参数：节点总数。
- * 使用示例：
- *     for (i = 1; i <= Car_Menu_NodeCount(); i++) { }
- * 备注信息：当前节点表为 53 个节点。
- */
-int16_t Car_Menu_NodeCount(void)
-{
-    return (int16_t)(CAR_MENU_NODE_COUNT - 1);
-}
-
-/*
- * 函数名称：menu_valid_index
- * 函数功能：判断节点索引是否落在有效范围（1 ~ 节点总数-1）。
- * 参数说明：index —— 待检查的索引。
- * 返回参数：1 有效；0 无效。
- * 使用示例：
- *     if (menu_valid_index(node->next)) { }
- * 备注信息：索引 0 是保留的空索引，不算有效节点。
- */
-static uint8_t menu_valid_index(int16_t index)
-{
-    return (index > CAR_MENU_INDEX_NONE && index < CAR_MENU_NODE_COUNT)
-         ? 1U : 0U;
-}
-
-/*
- * 函数名称：menu_in_child_list
- * 函数功能：判断节点是否位于指定父节点的 child 子链表中。
- * 参数说明：parent —— 父节点索引；
- *           node   —— 待查找的节点索引。
- * 返回参数：1 在子链表中；0 不在或参数无效。
- * 使用示例：
- *     if (!menu_in_child_list(node->parent, i)) { error++; }
- * 备注信息：沿 child 入口的 next 指针遍历，带节点总数上限防止坏链死循环。
- */
-static uint8_t menu_in_child_list(int16_t parent, int16_t node)
-{
-    int16_t current;
-    uint16_t guard = 0U;
-
-    if (!menu_valid_index(parent) || !menu_valid_index(node))
-    {
-        return 0U;
-    }
-
-    current = car_menu_nodes[parent].child;
-
-    while (current != CAR_MENU_INDEX_NONE && guard < CAR_MENU_NODE_COUNT)
-    {
-        if (!menu_valid_index(current))
-        {
-            return 0U;
-        }
-
-        if (current == node)
-        {
-            return 1U;
-        }
-
-        current = car_menu_nodes[current].next;
-        guard++;
-    }
-
-    return 0U;
+    menu_link_errors = errors;
+    return (errors == 0U) ? 1U : 0U;
 }
 
 /*
  * 函数名称：Car_Menu_ValidateLinks
- * 函数功能：检查静态节点表的建链是否闭合，结果写入 menu_link_errors。
+ * 函数功能：检查建链是否闭合、同级链是否环形、父链是否可达 MAIN。
  * 参数说明：无。
- * 返回参数：1 全部通过；0 存在建链错误。
+ * 返回参数：1 通过；0 存在错误。
  * 使用示例：
  *     if (!Car_Menu_ValidateLinks())
  *     {
- *         // 建链表有错，禁止进入比赛流程
+ *         // 建链错误
  *     }
- * 备注信息：检查 next/prev 互逆、parent/child 包含关系、branch_to/
- *           merge_to/pid_link 目标、pid_page 唯一性和四个目录入口。
- *           只读遍历，不修改节点表；可在上电初始化和主机测试中调用。
+ * 备注信息：只读检查，不修改 nodes[]；结果写入 menu_link_errors。
  */
 uint8_t Car_Menu_ValidateLinks(void)
 {
     uint16_t errors = 0U;
-    int16_t i;
-    int16_t j;
-    uint8_t category;
-    uint8_t page;
+    int i;
+    int root_count = 0;
 
-    for (i = 1; i < CAR_MENU_NODE_COUNT; i++)
+    for (i = 0; i < MENU_COUNT; i++)
     {
-        const CarMenuNode *node = &car_menu_nodes[i];
+        const MenuConfig *config = &MenuTable[i];
 
-        if (node->id == 0 || node->name == 0 || node->label == 0)
-        {
-            errors++;
-        }
-        if ((unsigned)node->category >= CAR_MENU_CAT_COUNT)
-        {
-            errors++;
-        }
-        if ((unsigned)node->type > CAR_MENU_TYPE_FLOW)
-        {
-            errors++;
-        }
-        if ((unsigned)node->skippable > CAR_MENU_SKIP_PARTIAL)
-        {
-            errors++;
-        }
-        if ((unsigned)node->lap > CAR_MENU_LAP_BOTH)
-        {
-            errors++;
-        }
-        if ((unsigned)node->trigger > CAR_MENU_TRIG_MANUAL)
-        {
-            errors++;
-        }
-        if ((unsigned)node->status > CAR_MENU_STATUS_TBD)
-        {
-            errors++;
-        }
-        if ((unsigned)node->kalman > CAR_MENU_KALMAN_INDIRECT)
-        {
-            errors++;
-        }
-        if (node->pid_page > 13U)
+        if (nodes[i].info != config)
         {
             errors++;
         }
 
-        /* next/prev 必须互为逆；否则遍历会跳错页或跳过节点。 */
-        if (node->next != CAR_MENU_INDEX_NONE &&
-            (!menu_valid_index(node->next) ||
-             car_menu_nodes[node->next].prev != i))
+        if (config->parent_id == MENU_NONE)
         {
-            errors++;
-        }
-        if (node->prev != CAR_MENU_INDEX_NONE &&
-            (!menu_valid_index(node->prev) ||
-             car_menu_nodes[node->prev].next != i))
-        {
-            errors++;
-        }
-
-        /* 事件分支与跨目录链接的目标必须在节点表内。 */
-        if (node->branch_to != CAR_MENU_INDEX_NONE &&
-            !menu_valid_index(node->branch_to))
-        {
-            errors++;
-        }
-        if (node->merge_to != CAR_MENU_INDEX_NONE &&
-            !menu_valid_index(node->merge_to))
-        {
-            errors++;
-        }
-        if (node->pid_link != CAR_MENU_INDEX_NONE &&
-            !menu_valid_index(node->pid_link))
-        {
-            errors++;
-        }
-
-        /* child 是子链表入口；parent 必须能在该子链表中找到当前节点。 */
-        if (node->child != CAR_MENU_INDEX_NONE &&
-            (!menu_valid_index(node->child) ||
-             car_menu_nodes[node->child].parent != i))
-        {
-            errors++;
-        }
-        if (node->parent != CAR_MENU_INDEX_NONE &&
-            !menu_in_child_list(node->parent, i))
-        {
-            errors++;
-        }
-
-        /* 节点 ID 必须唯一，便于 Car_Menu_GotoId() 稳定跳转。 */
-        if (node->id != 0)
-        {
-            for (j = (int16_t)(i + 1); j < CAR_MENU_NODE_COUNT; j++)
+            root_count++;
+            if (nodes[i].parent != NULL)
             {
-                if (car_menu_nodes[j].id != 0 &&
-                    strcmp(node->id, car_menu_nodes[j].id) == 0)
+                errors++;
+            }
+        }
+        else if (config->parent_id < 0 || config->parent_id >= MENU_COUNT)
+        {
+            errors++;
+        }
+        else if (nodes[i].parent != &nodes[config->parent_id])
+        {
+            errors++;
+        }
+
+        if (config->value != NULL)
+        {
+            if (config->min > config->max || config->step <= 0)
+            {
+                errors++;
+            }
+        }
+
+        if (config->pid_link != MENU_NONE &&
+            (config->pid_link < 0 || config->pid_link >= MENU_COUNT))
+        {
+            errors++;
+        }
+    }
+
+    if (root_count != 1 || nodes[MAIN].parent != NULL)
+    {
+        errors++;
+    }
+
+    for (i = 0; i < MENU_COUNT; i++)
+    {
+        MenuNode *first = nodes[i].child;
+
+        if (first != NULL)
+        {
+            MenuNode *current = first;
+            uint16_t count = 0U;
+
+            do
+            {
+                if (current->parent != &nodes[i] ||
+                    current->next == NULL || current->next->prev != current ||
+                    current->prev == NULL || current->prev->next != current)
                 {
                     errors++;
+                    break;
                 }
-            }
-        }
-    }
 
-    /* P01~P13 的 pid_page 必须 1~13 各出现一次。 */
-    for (page = 1U; page <= 13U; page++)
-    {
-        uint16_t matches = 0U;
+                current = current->next;
+                count++;
+            } while (current != first && count < (uint16_t)MENU_COUNT);
 
-        for (i = 1; i < CAR_MENU_NODE_COUNT; i++)
-        {
-            if (car_menu_nodes[i].pid_page == page)
+            if (current != first || count == 0U)
             {
-                matches++;
+                errors++;
             }
-        }
-
-        if (matches != 1U)
-        {
-            errors++;
         }
     }
 
-    /* 四个一级目录入口必须存在，且分类与数组顺序一致。 */
-    for (category = 0U; category < CAR_MENU_CAT_COUNT; category++)
+    for (i = 1; i < MENU_COUNT; i++)
     {
-        int16_t head = category_head[category];
+        const MenuNode *current = &nodes[i];
+        uint16_t depth = 0U;
 
-        if (!menu_valid_index(head) ||
-            (unsigned)car_menu_nodes[head].category != category)
+        while (current->parent != NULL)
+        {
+            current = current->parent;
+            depth++;
+            if (depth > (uint16_t)MENU_COUNT)
+            {
+                errors++;
+                break;
+            }
+        }
+
+        if (current != &nodes[MAIN])
         {
             errors++;
         }
@@ -1558,46 +526,392 @@ uint8_t Car_Menu_ValidateLinks(void)
  * 函数名称：Car_Menu_LinkErrorCount
  * 函数功能：返回最近一次建链自检发现的错误数量。
  * 参数说明：无。
- * 返回参数：错误数；0 表示建链通过。
+ * 返回参数：错误数；0 表示通过。
  * 使用示例：
  *     uint16_t errors = Car_Menu_LinkErrorCount();
- * 备注信息：每次调用 Car_Menu_ValidateLinks() 都会重新计数。
+ * 备注信息：每次 Car_Menu_BuildLink() 或 Car_Menu_ValidateLinks() 后更新。
  */
 uint16_t Car_Menu_LinkErrorCount(void)
 {
     return menu_link_errors;
 }
 
+/* ========================================================================== */
+/*                              浏览与编辑                                     */
+/* ========================================================================== */
+
 /*
- * 函数名称：Car_Menu_SetLap
- * 函数功能：设置菜单显示的第一圈/第二圈状态。
- * 参数说明：lap —— CAR_MENU_LAP_FIRST / SECOND / BOTH。
- * 返回参数：无。
+ * 函数名称：Car_Menu_Update
+ * 函数功能：根据按键事件推进浏览或编辑状态机。
+ * 参数说明：key   —— 按键编号（KEY_UP/KEY_DOWN/KEY_OK）；
+ *           event —— 按键事件。
+ * 返回参数：1 状态改变；0 忽略。
  * 使用示例：
- *     Car_Menu_SetLap(CAR_MENU_LAP_SECOND);
- * 备注信息：仅影响显示；圈次执行由上层状态机负责。参数越界时忽略。
+ *     Car_Menu_Update(KEY_OK, KEY_EVENT_SINGLE_CLICK);
+ * 备注信息：浏览模式下 UP/DOWN 移动，OK 进入/编辑，双击 OK 返回，
+ *           长按 OK 回到 MAIN；编辑模式下 UP/DOWN 调整，OK 提交，
+ *           双击 OK 取消。
  */
-void Car_Menu_SetLap(CarMenuLap lap)
+uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
 {
-    if (lap > CAR_MENU_LAP_BOTH)
+    if (page == NULL || selected == NULL)
     {
-        return;
+        return 0U;
     }
 
-    menu.lap = lap;
-    menu.dirty = 1U;
+    if (editing)
+    {
+        const MenuConfig *item = selected->info;
+        int32_t next;
+
+        if (item == NULL || item->value == NULL)
+        {
+            editing = 0U;
+            return 1U;
+        }
+
+        switch (key)
+        {
+            case KEY_UP:
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+                {
+                    next = edit_value + item->step;
+                    if (next > item->max)
+                    {
+                        next = item->max;
+                    }
+                    if (next != edit_value)
+                    {
+                        edit_value = next;
+                        return 1U;
+                    }
+                }
+                break;
+
+            case KEY_DOWN:
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+                {
+                    next = edit_value - item->step;
+                    if (next < item->min)
+                    {
+                        next = item->min;
+                    }
+                    if (next != edit_value)
+                    {
+                        edit_value = next;
+                        return 1U;
+                    }
+                }
+                break;
+
+            case KEY_OK:
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_LONG_PRESS)
+                {
+                    *item->value = edit_value;
+                    editing = 0U;
+                    return 1U;
+                }
+                if (event == KEY_EVENT_DOUBLE_CLICK)
+                {
+                    editing = 0U;
+                    return 1U;
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        return 0U;
+    }
+
+    switch (key)
+    {
+        case KEY_UP:
+            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+            {
+                selected = selected->prev;
+                return 1U;
+            }
+            break;
+
+        case KEY_DOWN:
+            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+            {
+                selected = selected->next;
+                return 1U;
+            }
+            break;
+
+        case KEY_OK:
+            if (event == KEY_EVENT_SINGLE_CLICK)
+            {
+                if (selected->child != NULL)
+                {
+                    page = selected;
+                    selected = page->child;
+                    return 1U;
+                }
+
+                if (selected->info != NULL && selected->info->value != NULL)
+                {
+                    edit_value = *selected->info->value;
+                    if (edit_value < selected->info->min)
+                    {
+                        edit_value = selected->info->min;
+                    }
+                    if (edit_value > selected->info->max)
+                    {
+                        edit_value = selected->info->max;
+                    }
+                    editing = 1U;
+                    return 1U;
+                }
+
+                return 0U;
+            }
+
+            if (event == KEY_EVENT_DOUBLE_CLICK)
+            {
+                if (page->parent != NULL)
+                {
+                    selected = page;
+                    page = page->parent;
+                    return 1U;
+                }
+                return 0U;
+            }
+
+            if (event == KEY_EVENT_LONG_PRESS)
+            {
+                page = &nodes[MAIN];
+                selected = page->child;
+                editing = 0U;
+                return 1U;
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    return 0U;
+}
+
+/* ========================================================================== */
+/*                              对外接口                                       */
+/* ========================================================================== */
+
+/*
+ * 函数名称：Car_Menu_Init
+ * 函数功能：初始化参数、建链、自检并初始化按键。
+ * 参数说明：无。
+ * 返回参数：无。
+ * 使用示例：
+ *     Car_Menu_Init();
+ * 备注信息：不初始化 LCD；当前显示层已暂时移除。
+ */
+void Car_Menu_Init(void)
+{
+    menu_reset_params();
+    (void)Car_Menu_BuildLink();
+    (void)Car_Menu_ValidateLinks();
+
+    page = &nodes[MAIN];
+    selected = page->child;
+    editing = 0U;
+    edit_value = 0;
+
+    Key_Init();
 }
 
 /*
- * 函数名称：Car_Menu_GetLap
- * 函数功能：读取菜单显示的第一圈/第二圈状态。
+ * 函数名称：Car_Menu_Poll
+ * 函数功能：扫描按键并处理全部待处理事件。
  * 参数说明：无。
- * 返回参数：当前显示圈次。
+ * 返回参数：无。
  * 使用示例：
- *     CarMenuLap lap = Car_Menu_GetLap();
- * 备注信息：该值不代表底盘实际圈次，只代表菜单状态。
+ *     while (1) { Car_Menu_Poll(); }
+ * 备注信息：建议每 5~10 ms 调用一次；显示层暂时为空。
  */
-CarMenuLap Car_Menu_GetLap(void)
+void Car_Menu_Poll(void)
 {
-    return menu.lap;
+    unsigned i;
+    Key_Event event;
+
+    Key_Scan(HAL_GetTick());
+
+    for (i = 0U; i < KEY_COUNT; i++)
+    {
+        while (Key_PollEvent((Key_Id)i, &event))
+        {
+            (void)Car_Menu_Update((Key_Id)i, event);
+        }
+    }
+}
+
+/*
+ * 函数名称：Car_Menu_Render
+ * 函数功能：显示入口；当前为空实现。
+ * 参数说明：无。
+ * 返回参数：无。
+ * 使用示例：
+ *     Car_Menu_Render();
+ * 备注信息：LCD200 默认 Cross 横屏为 320x240，原竖屏 17 行布局超出高度，
+ *           属于显示 bug，已暂时删除渲染代码；待按横屏重新设计后恢复。
+ */
+void Car_Menu_Render(void)
+{
+    /* 暂时不显示，避免越界写屏。 */
+}
+
+/*
+ * 函数名称：Car_Menu_Goto
+ * 函数功能：跳转到指定节点。
+ * 参数说明：id —— 目标节点编号。
+ * 返回参数：1 成功；0 编号无效。
+ * 使用示例：
+ *     Car_Menu_Goto(P10);
+ * 备注信息：叶子节点进入其父页面并选中自己；页面节点进入自身。
+ */
+uint8_t Car_Menu_Goto(MenuID id)
+{
+    MenuNode *node;
+
+    if (id < 0 || id >= MENU_COUNT)
+    {
+        return 0U;
+    }
+
+    node = &nodes[id];
+
+    if (node->parent != NULL)
+    {
+        page = node->parent;
+        selected = node;
+    }
+    else
+    {
+        page = node;
+        selected = node->child;
+    }
+
+    editing = 0U;
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Menu_GetPageId
+ * 函数功能：返回当前页面编号。
+ * 参数说明：无。
+ * 返回参数：页面编号；未初始化返回 MENU_NONE。
+ * 使用示例：
+ *     MenuID page_id = Car_Menu_GetPageId();
+ * 备注信息：通过指针差计算，nodes[] 是固定数组。
+ */
+MenuID Car_Menu_GetPageId(void)
+{
+    return (page != NULL) ? (MenuID)(page - nodes) : MENU_NONE;
+}
+
+/*
+ * 函数名称：Car_Menu_GetSelectedId
+ * 函数功能：返回当前选中项编号。
+ * 参数说明：无。
+ * 返回参数：选中项编号；未初始化返回 MENU_NONE。
+ * 使用示例：
+ *     MenuID selected_id = Car_Menu_GetSelectedId();
+ * 备注信息：selected 永远是 page 的子节点。
+ */
+MenuID Car_Menu_GetSelectedId(void)
+{
+    return (selected != NULL) ? (MenuID)(selected - nodes) : MENU_NONE;
+}
+
+/*
+ * 函数名称：Car_Menu_IsEditing
+ * 函数功能：返回当前是否处于编辑模式。
+ * 参数说明：无。
+ * 返回参数：1 编辑；0 浏览。
+ * 使用示例：
+ *     if (Car_Menu_IsEditing()) { }
+ * 备注信息：无。
+ */
+uint8_t Car_Menu_IsEditing(void)
+{
+    return editing;
+}
+
+/*
+ * 函数名称：Car_Menu_GetEditValue
+ * 函数功能：返回编辑中的临时值。
+ * 参数说明：无。
+ * 返回参数：编辑值；非编辑模式返回 0。
+ * 使用示例：
+ *     int32_t value = Car_Menu_GetEditValue();
+ * 备注信息：无。
+ */
+int32_t Car_Menu_GetEditValue(void)
+{
+    return (editing != 0U) ? edit_value : 0;
+}
+
+/*
+ * 函数名称：Car_Menu_SetEditValue
+ * 函数功能：直接设置编辑值，并按当前选中项的范围限幅。
+ * 参数说明：value —— 新值。
+ * 返回参数：无。
+ * 使用示例：
+ *     Car_Menu_SetEditValue(200);
+ * 备注信息：用于测试或外部恢复；提交仍由 Car_Menu_Update() 完成。
+ */
+void Car_Menu_SetEditValue(int32_t value)
+{
+    edit_value = value;
+
+    if (editing != 0U && selected != NULL && selected->info != NULL &&
+        selected->info->value != NULL)
+    {
+        if (edit_value < selected->info->min)
+        {
+            edit_value = selected->info->min;
+        }
+        if (edit_value > selected->info->max)
+        {
+            edit_value = selected->info->max;
+        }
+    }
+}
+
+/*
+ * 函数名称：Car_Menu_GetConfig
+ * 函数功能：按编号取节点的静态配置。
+ * 参数说明：id —— 节点编号。
+ * 返回参数：配置指针；编号无效返回 NULL。
+ * 使用示例：
+ *     const MenuConfig *cfg = Car_Menu_GetConfig(P10);
+ * 备注信息：返回只读常量表指针，调用者不得写入。
+ */
+const MenuConfig *Car_Menu_GetConfig(MenuID id)
+{
+    if (id < 0 || id >= MENU_COUNT)
+    {
+        return NULL;
+    }
+
+    return &MenuTable[id];
+}
+
+/*
+ * 函数名称：Car_Menu_NodeCount
+ * 函数功能：返回节点总数（不含 MENU_NONE）。
+ * 参数说明：无。
+ * 返回参数：MENU_COUNT。
+ * 使用示例：
+ *     for (i = 0; i < Car_Menu_NodeCount(); i++) { }
+ * 备注信息：当前为 58 个：MAIN + 4 个目录 + 53 个竞赛节点。
+ */
+int16_t Car_Menu_NodeCount(void)
+{
+    return (int16_t)MENU_COUNT;
 }

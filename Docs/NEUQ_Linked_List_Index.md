@@ -33,6 +33,8 @@
 
 ## 3. 链表节点总表
 
+> 代码中的 `MenuID` 还包含 `MAIN` 与 `CAT_*` 五个导航页；下表只列 53 个竞赛节点。
+
 > 分类缩写：数独 / 香橙派 / 赛题PID / 电池。类型缩写：基本 / 得分 / 罚时 / 规则 / 硬件 / TBD / 子流程。圈：1=第一圈，2=第二圈，全=全程。卡尔曼：是 / 否 / 间接。
 
 | ID | 名称 | 分类 | 类型 | 可屏蔽 | 圈 | 得分/罚时 | prev | next | pid_page | 卡尔曼 | 状态 |
@@ -97,12 +99,12 @@
 
 ```mermaid
 flowchart TD
-    ROOT["NEUQ 校赛链表式目录"]
+    ROOT["MAIN 导航根"]
 
-    ROOT --> S["数独<br/>S01–S09"]
-    ROOT --> O["香橙派<br/>O01–O08"]
-    ROOT --> P["赛题元素PID<br/>主链 N01–N17 + PID页 P01–P13"]
-    ROOT --> B["电池电压显示<br/>B01–B06"]
+    ROOT --> S["CAT_SUDOKU 数独<br/>S01–S09"]
+    ROOT --> O["CAT_ORANGEPI 香橙派<br/>O01–O08"]
+    ROOT --> P["CAT_PID 赛题元素PID<br/>主链 N01–N17 + PID页 P01–P13"]
+    ROOT --> B["CAT_BATTERY 电池电压显示<br/>B01–B06"]
 
     S --> S01["S01 数独任务总览"]
     S01 --> S02["S02 四份子块采集"]
@@ -176,9 +178,11 @@ flowchart TD
 
 ## 3.2 节点树状图（ASCII）
 
+> `MAIN` 和 `CAT_*` 是导航页面，不计入 53 个竞赛节点，也不构成第五个一级分类。
+
 ```text
-NEUQ 校赛链表式目录
-├─ 数独（S01–S09）
+MAIN 导航根
+├─ CAT_SUDOKU 数独（S01–S09）
 │  ├─ S01 数独任务总览
 │  ├─ S02 四份子块采集
 │  ├─ S03 Tag36h11 0~7 定位与校验
@@ -188,7 +192,7 @@ NEUQ 校赛链表式目录
 │  ├─ S07 数独完成 -25s 奖励判定
 │  ├─ S08 数独主动屏蔽与无奖励
 │  └─ S09 数独视觉流程PID链接
-├─ 香橙派（O01–O08）
+├─ CAT_ORANGEPI 香橙派（O01–O08）
 │  ├─ O01 香橙派与核心板型号约束
 │  ├─ O02 摄像头选型与连接
 │  ├─ O03 图像采集管线
@@ -197,7 +201,7 @@ NEUQ 校赛链表式目录
 │  ├─ O06 与PID/卡尔曼数据流
 │  ├─ O07 日志与故障排查
 │  └─ O08 香橙派现场TBD
-├─ 赛题元素PID
+├─ CAT_PID 赛题元素PID
 │  ├─ 主链（N01–N17）
 │  │  ├─ N01 发车启动
 │  │  ├─ N02 第一圈竞速计时
@@ -230,7 +234,7 @@ NEUQ 校赛链表式目录
 │     ├─ P11 软件盲盒与真正停车点页
 │     ├─ P12 第一圈/第二圈状态切换与安全联锁页
 │     └─ P13 路障检测与颜色分支调度页
-└─ 电池电压显示（B01–B06）
+└─ CAT_BATTERY 电池电压显示（B01–B06）
    ├─ B01 电压采集与分压电路
    ├─ B02 ADC采样与滤波
    ├─ B03 屏幕电压显示
@@ -273,73 +277,120 @@ N01 发车
 
 ## 4.1 建链规则（Link-building）
 
-> 本手册前面给出的是“逻辑链”；本节说明这些链是**怎么建起来的**，以及在代码中的对应位置。建链不是一次性画线，而是由 7 类链接字段共同构成。
+> 代码参考提交的菜单框架：`MenuID` 统一编号，`MenuConfig.parent_id` 描述层级，`Car_Menu_BuildLink()` 在运行时建链。一级目录仍固定四类；`MAIN` 只是导航根页面，不是第五类。
 
-### 4.1.1 链接字段
+### 4.1.1 枚举格式
 
-| 字段 | 方向 | 建链含义 | 约束 |
-|---|---|---|---|
-| `prev` | 反向 | 同级前驱 | 与 `next` 互为逆；表头为空 |
-| `next` | 正向 | 同级后继 | 与 `prev` 互为逆；表尾为空 |
-| `branch_to` | 事件 | 颜色/事件分支入口 | N07 使用；第一圈路障不可屏蔽 |
-| `merge_to` | 汇合 | 分支结束回到主链 | N08/N09/N10 → N11 |
-| `parent` | 向上 | 子链表所属页面 | N08/N09/N10 → N07 |
-| `child` | 向下 | 进入子链表入口 | N07 → N08 |
-| `pid_link` | 跨目录 | 双向链接到 PID 页 | 目标必须是 P01–P13 |
-| `pid_page` | 页面号 | PID 页编号 | P01–P13 唯一且为 1–13 |
-
-### 4.1.2 建链步骤
-
-1. **四条一级目录链**：`S01→S02→…→S09`、`O01→…→O08`、`N01→…→N17→P01→…→P13`、`B01→…→B06`；每条链的表头 `prev = —`，表尾 `next = —`。
-2. **主链跳转**：`N06.next = N07`，`N07.next = N11`，`N11.next = N12`，`N16.next = N17`，`N17.next = P01`。
-3. **路障事件子链**：`N07.child = N08`；`N08.next = N09`；`N09.next = N10`；`N10.next = —`；N08/N09/N10 的 `parent = N07`、`merge_to = N11`。
-4. **颜色分支**：`N07.branch_to = N08`（绿/黄/红由运行时颜色选择 N08/N09/N10，不把位置写死）。
-5. **跨目录双向链接**：`N14 ↔ S01`、`S09 ↔ P10`、`N03 ↔ P01`、`O06 ↔ P12`、`B04/B05 ↔ P12`、`N07 ↔ P13`。
-6. **PID 页编号**：P01–P13 的 `pid_page` 分别为 1–13，且全表只出现一次。
-
-### 4.1.3 建链不变量（自检项）
-
-| 不变量 | 检查方式 |
-|---|---|
-| next/prev 互逆 | 若 `A.next = B`，则必须 `B.prev = A` |
-| parent/child 包含 | 若 `X.parent = P`，则 X 必须能从 `P.child` 沿 `next` 到达 |
-| branch/merge 有效 | 目标索引必须落在 1–53 |
-| pid_link 有效 | 目标必须是 P01–P13 |
-| pid_page 唯一 | 1–13 每个编号恰好出现一次 |
-| 目录入口匹配 | `category_head[]` 的四个入口分类正确 |
-| ID 唯一 | 53 个节点 ID 不重复 |
-| 无环 | 子链表遍历有节点总数上限保护 |
-
-### 4.1.4 伪代码
-
-```text
-for each node i in 1..53:
-    if node[i].next != NONE:
-        assert node[node[i].next].prev == i
-    if node[i].prev != NONE:
-        assert node[node[i].prev].next == i
-    if node[i].child != NONE:
-        assert node[node[i].child].parent == i
-    if node[i].parent != NONE:
-        assert exists path: node[parent].child -> ... -> i
-    assert all link targets in 1..53
-    assert node[i].id is unique
-
-for page in 1..13:
-    assert count(node[*].pid_page == page) == 1
-
-for category in 0..3:
-    assert node[category_head[category]].category == category
+```c
+typedef enum {
+    MENU_NONE = -1,   /* 空链接/无父节点 */
+    MAIN = 0,         /* 导航根 */
+    CAT_SUDOKU, CAT_ORANGEPI, CAT_PID, CAT_BATTERY,
+    S01, /* ... */ S09,
+    O01, /* ... */ O08,
+    N01, /* ... */ N17,
+    P01, /* ... */ P13,
+    B01, /* ... */ B06,
+    MENU_COUNT
+} MenuID;
 ```
 
-### 4.1.5 代码中的建链位置
+- `MENU_NONE = -1` 表示无父节点/无链接；
+- `MAIN = 0` 是导航根；
+- 枚举顺序决定同级节点的初始排列顺序；
+- `MENU_COUNT` 是节点总数（当前 58）。
 
-- **静态建链**：`CODE/Car_menu.c` 的 `car_menu_nodes[]`，使用 C99 指定初始化器把 `prev/next/branch_to/merge_to/parent/child/pid_link` 一次性写入只读常量表；索引 `0` 保留为 `CAR_MENU_INDEX_NONE`，省略字段默认无链接。
-- **不需要运行时 malloc 或指针修补**：链在编译期就已闭合，运行时只读遍历。
-- **建链自检**：`Car_Menu_ValidateLinks()` 按 4.1.3 的不变量逐项检查，`Car_Menu_LinkErrorCount()` 返回错误数；`Car_Menu_Init()` 启动时执行一次，并在 LCD 底部显示 `LINKCHECK: OK/ERR`。
-- **修改节点头文件后**：先跑自检，再上电联调；若 `LINKCHECK: ERR`，按 `Car_Menu_LinkErrorCount()` 与节点表逐项核对。
+### 4.1.2 配置表字段
 
----
+| 字段 | 含义 | 建链作用 |
+|---|---|---|
+| `name` | ASCII 显示名 | 页面标题 |
+| `parent_id` | 父节点编号 | **建链的唯一层级依据** |
+| `value` | 可编辑参数地址 | 非空表示可编辑；`NULL` 表示纯页面 |
+| `min/max/step` | 编辑范围/步长 | 编辑模式限幅 |
+| `pid_link` | 跨目录链接 | 元数据，不参与父子建链 |
+| `type/skippable/lap/score/kalman/status` | 竞赛元数据 | 不参与建链 |
+
+### 4.1.3 建链步骤
+
+1. 清空 `nodes[MENU_COUNT]`，把每个节点的 `info` 指向 `MenuTable[i]`；
+2. 遍历 `i = 0..MENU_COUNT-1`，若 `parent_id != MENU_NONE`，把节点挂到父节点的 child 链；
+3. 同级链是**环形双向链表**：第一个子节点的 `prev/next` 指向自己；后续节点插到表尾；
+4. `MAIN` 是唯一根；`CAT_*` 是四个一级目录；竞赛节点挂在对应目录下；
+5. `N07` 的子节点为 `N08/N09/N10`，形成路障颜色分支子链；
+6. `CAT_PID` 的同级顺序为 `N01..N07、N11..N17、P01..P13`。
+
+### 4.1.4 建链不变量（自检项）
+
+| 不变量 | 检查 |
+|---|---|
+| 根唯一 | 只有 `MAIN` 的 `parent_id == MENU_NONE` |
+| 父指针一致 | `nodes[i].parent == &nodes[parent_id]` |
+| 同级链环形 | 首节点 `prev/next` 自指，尾节点 `next` 回首节点 |
+| 父链可达 MAIN | 每个非 MAIN 节点沿 parent 最终到达 MAIN |
+| 无环/无自引用 | 深度不超过 `MENU_COUNT`，`parent_id != i` |
+| 编辑范围合法 | `value != NULL` 时 `min <= max` 且 `step > 0` |
+| pid_link 有效 | 非 `MENU_NONE` 时落在 0..MENU_COUNT-1 |
+
+### 4.1.5 伪代码
+
+```text
+for i in 0..MENU_COUNT-1:
+    nodes[i].info = &MenuTable[i]
+    clear parent/child/prev/next
+
+for i in 0..MENU_COUNT-1:
+    if MenuTable[i].parent_id == MENU_NONE: continue
+    parent = &nodes[parent_id]
+    if parent.child == NULL:
+        parent.child = node
+        node.prev = node.next = node
+    else:
+        last = parent.child.prev
+        node.prev = last; last.next = node
+        node.next = parent.child; parent.child.prev = node
+```
+
+### 4.1.6 代码位置
+
+- `CODE/Car_menu.h`：`MenuID`、`MenuConfig`、`CarMenuParams`；
+- `CODE/Car_menu.c`：`MenuTable[]`、`Car_Menu_BuildLink()`、`Car_Menu_ValidateLinks()`；
+- 建链后 `page = &nodes[MAIN]`、`selected = page->child`；
+- `Car_Menu_Init()` 自动执行建链和自检；`Car_Menu_LinkErrorCount()` 返回错误数。
+
+## 4.2 编辑与浏览
+
+### 4.2.1 状态
+
+| 变量 | 含义 |
+|---|---|
+| `page` | 当前页面 |
+| `selected` | 当前选中项，永远是 `page` 的子节点 |
+| `editing` | 0 浏览，1 编辑 |
+| `edit_value` | 编辑中的临时值 |
+
+### 4.2.2 按键映射
+
+| 模式 | 按键 | 动作 |
+|---|---|---|
+| 浏览 | UP/DOWN 单击或长按重复 | 同级 `prev/next`，环形回绕 |
+| 浏览 | OK 单击 | 有子节点则进入；否则 `value != NULL` 则进入编辑 |
+| 浏览 | OK 双击 | 返回父页面 |
+| 浏览 | OK 长按 | 回到 MAIN |
+| 编辑 | UP/DOWN 单击或长按重复 | `edit_value ± step`，按 min/max 限幅 |
+| 编辑 | OK 单击/长按 | 提交 `*value = edit_value`，退出编辑 |
+| 编辑 | OK 双击 | 取消，退出编辑 |
+
+### 4.2.3 可编辑参数
+
+`CarMenuParams` 当前包含：
+`pid_kp / pid_ki / pid_kd`、`kalman_q / kalman_r`、`lap_mode`、`speed_limit`、`ring_speed`、`cone_offset`、`red_stop_s`、`gap_speed`、`battery_low`。
+
+对应页面：P01、P02、P03、P04、P05、P06、P08、P09、P12、N12、B04；其余节点 `value = NULL`，只浏览。
+
+### 4.2.4 显示层
+
+LCD200 默认 `LCD200_DIR_Cross` 是 **320x240 横屏**；原 17 行竖屏布局超过 240 像素高度，属于显示 bug，已暂时删除渲染代码（`Car_Menu_Render()` 为空实现）。建链、浏览、编辑逻辑不依赖 LCD；显示层按横屏重新设计后再恢复。
 
 ## 5. 分支/屏蔽/失败跳转表
 
@@ -810,7 +861,9 @@ stateDiagram-v2
 | 现场未知信息标 TBD | ✅ | 第10节 |
 | 双向链接格式 | ✅ | 全文 `[[页面名]]` |
 | 节点树状图 | ✅ | 第3.1节 Mermaid + 第3.2节 ASCII |
-| 建链规则与自检 | ✅ | 第4.1节；代码 `Car_Menu_ValidateLinks()` |
+| 建链规则与自检 | ✅ | 第4.1节；代码 `Car_Menu_BuildLink()` / `Car_Menu_ValidateLinks()` |
+| 编辑与浏览状态机 | ✅ | 第4.2节；代码 `Car_Menu_Update()` |
+| 显示层 bug 处理 | ✅ | 横屏 320x240 越界；`Car_Menu_Render()` 暂时为空实现 |
 
 ---
 
@@ -862,14 +915,19 @@ flowchart LR
 
 ## 附：代码骨架集成
 
-- `CODE/Car_menu.h`：四类目录、节点结构体、链表索引、菜单导航 API
-- `CODE/Car_menu.c`：53 节点链表表（N01–N17、S01–S09、O01–O08、P01–P13、B01–B06）、LCD 渲染、按键事件分发
+- `CODE/Car_menu.h`：`MenuID` 枚举、`MenuConfig` 配置表、`CarMenuParams`、建链/浏览/编辑 API
+- `CODE/Car_menu.c`：
+  - 58 个节点 = `MAIN` + 4 个一级目录 + 53 个竞赛节点；
+  - `Car_Menu_BuildLink()` 按 `parent_id` 建立父子关系和环形同级链；
+  - `Car_Menu_Update()` 实现浏览/编辑状态机；
+  - 显示层暂时移除（LCD200 横屏 320x240 与原竖屏布局冲突）。
 - `CODE/key.h`：三键驱动接口、双击开关 `KEY_ENABLE_DOUBLE_CLICK`、双击/长按/重复时间参数
 - `CODE/key.c`：非阻塞去抖状态机、单击/双击/长按/自动重复、事件环形队列
 
 集成步骤：
-1. 在 Keil 工程 `CODE_Bluetooth_Car` 组中加入 `Car_menu.c`、`key.c`。
+1. 在 Keil 工程 `CODE_Bluetooth_Car` 组中加入 `Car_menu.c`、`key.c`；EIDE 使用 `srcDirs: ../CODE` 自动包含。
 2. 启动时调用一次 `Car_Menu_Init()`；主循环每 5–10 ms 调用 `Car_Menu_Poll()`。
 3. 按键默认 PB12/PB13/PB14，低电平有效；可通过 `KEY_UP_PIN` 等宏覆盖。
-4. LCD200 只有 ASCII 字库，屏幕显示节点 `label`，中文 `name` 保留给文档/调试。
+4. 显示层恢复前，菜单只做建链、浏览和参数编辑，不上屏。
 5. 双击默认开启；若不需要，将 `KEY_ENABLE_DOUBLE_CLICK` 设为 `0`。
+6. ARMCC 5 在 `--locale=english` 下编译；Keil 工程 MiscControls 已加入该选项。
