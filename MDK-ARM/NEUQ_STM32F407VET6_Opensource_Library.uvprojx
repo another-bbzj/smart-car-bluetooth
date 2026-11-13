@@ -337,7 +337,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls></MiscControls>
+              <MiscControls>--locale=english</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx</Define>
               <Undefine></Undefine>
               <IncludePath>.;../Library/HAL_lib/Core/Inc;../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc;../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc/Legacy;../Library/NEUQ_lib;../Library/NEUQ_lib/NEUQ_lib_APP;../Library/NEUQ_lib/NEUQ_lib_Debug;../Library/NEUQ_lib/NEUQ_lib_Device;../Library/NEUQ_lib/NEUQ_lib_Driver;../User;../CODE</IncludePath>
