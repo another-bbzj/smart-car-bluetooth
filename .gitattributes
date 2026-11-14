@@ -8,6 +8,10 @@
 *.S   text
 *.sct text
 
+# Linux 适配脚本始终使用 LF；附件快照保留原始字节（包括混合换行和空白）。
+Tools/*.sh text eol=lf
+Vision/** -text
+
 # Windows 专用 / Keil 工程文件：始终 CRLF
 *.bat      text eol=crlf
 *.uvprojx  text eol=crlf

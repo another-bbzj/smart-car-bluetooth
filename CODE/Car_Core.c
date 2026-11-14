@@ -70,6 +70,7 @@
 #include "Car_Config.h"
 
 #include <string.h>
+#include <float.h>
 
 /* ========================================================================== */
 /*                              内部工具函数                                   */
@@ -112,6 +113,61 @@ static float clamp(float x, float lim)
     }
 
     return x;        /* 未超限原样返回 */
+}
+
+/* 接收的是经协议校验的快照；只消费曲率，预瞄点横向位置不是车体横向误差。 */
+void Car_SetVisionObservation(Car_Core *c, const CarVisionObservation *o, uint32_t now_ms)
+{
+    uint32_t elapsed;
+    if (!o || !o->session || !(o->valid_mask & VISION_CURVATURE_VALID) ||
+        !(o->confidence >= CAR_AUTO_MIN_CONFIDENCE && o->confidence <= 1.0f) ||
+        !(o->curvature_inv_m <= CAR_AUTO_MAX_CURVATURE &&
+          o->curvature_inv_m >= -CAR_AUTO_MAX_CURVATURE))
+    {
+        c->vision_present = 0;
+        return;
+    }
+    elapsed = now_ms - o->received_ms;
+    if (elapsed >= CAR_AUTO_MAX_AGE_MS ||
+        o->processing_age_ms >= CAR_AUTO_MAX_AGE_MS - elapsed)
+    {
+        c->vision_present = 0;
+        return;
+    }
+    /* 相同帧只可增加估计年龄，不能通过重复调用让停止更新的相机保活。 */
+    if (c->vision_session != o->session || c->vision_sequence != o->sequence)
+    {
+        c->vision_age_us = (elapsed + o->processing_age_ms) * 1000U;
+        c->vision_session = o->session;
+        c->vision_sequence = o->sequence;
+        c->vision_present = 1;
+        c->vision_curvature = o->curvature_inv_m;
+    }
+    else if ((elapsed + o->processing_age_ms) * 1000U > c->vision_age_us)
+    {
+        c->vision_age_us = (elapsed + o->processing_age_ms) * 1000U;
+    }
+}
+
+static uint8_t auto_observation_ready(const Car_Core *c)
+{
+    return c->vision_present && c->vision_age_us < CAR_AUTO_MAX_AGE_MS * 1000U;
+}
+
+/* 左正曲率：左轮慢、右轮快；同比限幅保持路径曲率。 */
+static uint8_t auto_targets(Car_Core *c)
+{
+    float turn = c->vision_curvature * c->auto_track_m * 0.5f;
+    float rpm, peak, scale;
+    if (!(c->auto_diameter_m > 0.0f && c->auto_diameter_m <= FLT_MAX) ||
+        !(turn >= -0.8f && turn <= 0.8f)) return 0;
+    rpm = c->auto_speed_m_s * 60.0f / (3.14159265358979323846f * c->auto_diameter_m);
+    peak = rpm * (1.0f + absolute(turn));
+    if (!(peak >= 0.0f && peak <= FLT_MAX)) return 0;
+    scale = peak > CAR_AUTO_RPM_LIMIT ? CAR_AUTO_RPM_LIMIT / peak : 1.0f;
+    c->target[0] = rpm * (1.0f - turn) * scale;
+    c->target[1] = rpm * (1.0f + turn) * scale;
+    return 1;
 }
 
 /*
@@ -164,11 +220,18 @@ void Car_Init(Car_Core *c)
 
     memset(c, 0, sizeof(*c));                      /* 清空全部状态与历史 */
 
+    /* 运行时参数初始值来自 Car_Config.h，停车时可由菜单/协议修改。 */
+    c->rpm_limit = CAR_RPM_LIMIT;
+    c->pwm_limit = CAR_PWM_LIMIT;
+    c->accel_limit = CAR_ACCEL_LIMIT_RPM_S;
+    c->jerk_limit = CAR_JERK_LIMIT_RPM_S2;
+    c->cpr = CAR_ENCODER_CPR;
+
     /* 规划器限制来源：Car_Config.h 的指令限速、加速度和加加速度上限。 */
     CarReference_Init(&c->profile,
-                      CAR_RPM_LIMIT,
-                      CAR_ACCEL_LIMIT_RPM_S,
-                      CAR_JERK_LIMIT_RPM_S2);
+                      c->rpm_limit,
+                      c->accel_limit,
+                      c->jerk_limit);
 
     for (i = 0; i < 2; i++)
     {
@@ -177,7 +240,7 @@ void Car_Init(Car_Core *c)
                      CAR_DEFAULT_KP,
                      CAR_DEFAULT_KI,
                      CAR_DEFAULT_KD,
-                     CAR_PWM_LIMIT);
+                     c->pwm_limit);
 
         if (!Car_Pid_configure(&c->pid[i],
                                CAR_PID_SETPOINT_WEIGHT,
@@ -190,6 +253,137 @@ void Car_Init(Car_Core *c)
             Car_Fault(c, CAR_CONTROLLER_FAULT);    /* 配置失败立即进入故障 */
         }
     }
+}
+
+/*
+ * 函数名称：Car_Core_SetPid
+ * 函数功能：停车时替换单轮速度 PID 增益。
+ * 参数说明：c —— 控制对象；wheel —— 0 左 / 1 右；kp/ki/kd —— 新增益。
+ * 返回参数：1 成功；0 状态、轮号或参数非法。
+ * 备注信息：使用临时对象校验后整体替换，失败不修改原控制器。
+ */
+uint8_t Car_Core_SetPid(Car_Core *c, uint8_t wheel,
+                        float kp, float ki, float kd)
+{
+    Car_Pid_Struct next;
+
+    if (c == NULL || wheel > 1U || c->state != CAR_STOP)
+    {
+        return 0U;
+    }
+
+    if (!Car_Pid_init(&next, kp, ki, kd, c->pwm_limit) ||
+        !Car_Pid_configure(&next,
+                           CAR_PID_SETPOINT_WEIGHT,
+                           CAR_PID_D_TAU_S,
+                           1.0f,
+                           CAR_FF_KS,
+                           CAR_FF_KV,
+                           CAR_FF_KA))
+    {
+        return 0U;
+    }
+
+    c->pid[wheel] = next;
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_SetLimits
+ * 函数功能：停车时修改限速、PWM 限幅、参考加速度和加加速度。
+ * 参数说明：四个正数，单位分别为 rpm、PWM、rpm/s、rpm/s²。
+ * 返回参数：1 成功；0 非停车状态或参数越界，原配置不变。
+ * 备注信息：保留现有 PID 增益，重建规划器和控制器并清空运动历史。
+ */
+uint8_t Car_Core_SetLimits(Car_Core *c, float rpm_limit, float pwm_limit,
+                           float accel_limit, float jerk_limit)
+{
+    Car_Pid_Struct next[2];
+    unsigned i;
+
+    if (c == NULL || c->state != CAR_STOP)
+    {
+        return 0U;
+    }
+
+    /* 上限按当前硬件的安全范围限制，禁止菜单写入 0 或超量程。 */
+    if (!(rpm_limit >= 10.0f && rpm_limit <= 300.0f &&
+          pwm_limit >= 100.0f && pwm_limit <= 10000.0f &&
+          accel_limit >= 10.0f && accel_limit <= 5000.0f &&
+          jerk_limit >= 10.0f && jerk_limit <= 20000.0f))
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < 2U; i++)
+    {
+        if (!Car_Pid_init(&next[i],
+                          c->pid[i].kp, c->pid[i].ki, c->pid[i].kd,
+                          pwm_limit) ||
+            !Car_Pid_configure(&next[i],
+                               CAR_PID_SETPOINT_WEIGHT,
+                               CAR_PID_D_TAU_S,
+                               1.0f,
+                               CAR_FF_KS,
+                               CAR_FF_KV,
+                               CAR_FF_KA))
+        {
+            return 0U;
+        }
+    }
+
+    c->rpm_limit = rpm_limit;
+    c->pwm_limit = pwm_limit;
+    c->accel_limit = accel_limit;
+    c->jerk_limit = jerk_limit;
+
+    CarReference_Init(&c->profile, rpm_limit, accel_limit, jerk_limit);
+    reset_motion(c);
+
+    for (i = 0U; i < 2U; i++)
+    {
+        c->pid[i] = next[i];
+    }
+
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_SetCpr
+ * 函数功能：停车时修改编码器每输出轴一圈计数。
+ * 参数说明：cpr —— 新 CPR，范围 10~100000。
+ * 返回参数：1 成功；0 非停车状态或参数非法。
+ */
+uint8_t Car_Core_SetCpr(Car_Core *c, float cpr)
+{
+    if (c == NULL || c->state != CAR_STOP ||
+        !(cpr >= 10.0f && cpr <= 100000.0f))
+    {
+        return 0U;
+    }
+
+    c->cpr = cpr;
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_Stop
+ * 函数功能：执行与蓝牙 CMD2 等价的停车/清故障。
+ * 参数说明：c —— 控制对象。
+ * 备注信息：只清软件故障，不清除硬件故障源；不保证车轮已物理停止。
+ */
+void Car_Core_Stop(Car_Core *c)
+{
+    if (c == NULL)
+    {
+        return;
+    }
+
+    reset_motion(c);
+    c->state = CAR_STOP;
+    c->mode = CAR_MODE_MANUAL;
+    c->fault = 0;
+    c->link_us = 0;
 }
 
 /*
@@ -320,6 +514,7 @@ static void execute(Car_Core *c)
             }
 
             reset_motion(c);              /* 清空旧目标和历史 */
+            c->mode = CAR_MODE_MANUAL;
             c->link_us = 0;               /* 重置通信看门狗 */
             c->state = CAR_RUN;           /* 进入运行状态 */
             break;
@@ -328,20 +523,21 @@ static void execute(Car_Core *c)
             /* STOP：清除故障并立即归零，不等待速度规划曲线自然结束。 */
             reset_motion(c);              /* 立即清零输出 */
             c->state = CAR_STOP;          /* 回到停车状态 */
+            c->mode = CAR_MODE_MANUAL;
             c->fault = 0;                 /* 清除故障码 */
             c->link_us = 0;               /* 重置通信看门狗 */
             break;
 
         case 3:
             /* WHEELS：左、右目标转速；双轮都为零时立即复位运动状态。 */
-            if (c->state != CAR_RUN)
+            if (c->state != CAR_RUN || c->mode != CAR_MODE_MANUAL)
             {
                 c->result = 1;            /* 非运行状态拒绝转速命令 */
                 break;
             }
 
-            c->target[0] = clamp(signed_rpm(c->data), CAR_RPM_LIMIT);
-            c->target[1] = clamp(signed_rpm(c->data + 2), CAR_RPM_LIMIT);
+            c->target[0] = clamp(signed_rpm(c->data), c->rpm_limit);
+            c->target[1] = clamp(signed_rpm(c->data + 2), c->rpm_limit);
 
             if (c->target[0] == 0.0f && c->target[1] == 0.0f)
             {
@@ -372,7 +568,7 @@ static void execute(Car_Core *c)
                               u16(c->data + 1) / 100.0f,
                               u16(c->data + 3) / 100.0f,
                               u16(c->data + 5) / 100.0f,
-                              CAR_PWM_LIMIT) ||
+                              c->pwm_limit) ||
                 !Car_Pid_configure(&next,
                                    CAR_PID_SETPOINT_WEIGHT,
                                    CAR_PID_D_TAU_S,
@@ -396,6 +592,28 @@ static void execute(Car_Core *c)
                 c->link_us = 0;           /* 运行中喂看门狗 */
             }
             break;
+
+        case 6:
+        {
+            uint16_t diameter = u16(c->data);
+            uint16_t track = u16(c->data + 2);
+            uint16_t speed = u16(c->data + 4);
+            if (c->state != CAR_STOP) { c->result = 1; break; }
+            if (diameter < 20 || diameter > 200 || track < 50 || track > 500 ||
+                speed < 20 || speed > 150) { c->result = 2; break; }
+            if (!auto_observation_ready(c) || absolute(c->speed[0]) >= 5.0f ||
+                absolute(c->speed[1]) >= 5.0f) { c->result = 1; break; }
+            c->auto_diameter_m = diameter * 0.001f;
+            c->auto_track_m = track * 0.001f;
+            c->auto_speed_m_s = speed * 0.001f;
+            if (!auto_targets(c)) { reset_motion(c); c->result = 2; break; }
+            reset_motion(c);
+            c->auto_session = c->vision_session;
+            c->mode = CAR_MODE_AUTO;
+            c->link_us = 0;
+            c->state = CAR_RUN;
+            break;
+        }
 
         default:
             c->result = 3;                /* 未知命令 */
@@ -427,14 +645,15 @@ void Car_FeedByte(Car_Core *c, uint8_t byte)
      * 下标 0 占位，保证可以直接用命令号索引；先核验长度，
      * 才能保证后续写入 c->data[7] 不会越界。
      */
-    static const uint8_t lengths[6] =
+    static const uint8_t lengths[7] =
     {
         255,                                         /* 下标 0：无效命令占位 */
         0,                                           /* 命令 1：ARM，无负载 */
         0,                                           /* 命令 2：STOP，无负载 */
         4,                                           /* 命令 3：WHEELS，左右各 2 字节 */
         7,                                           /* 命令 4：PID，轮号 + 3 个 uint16 */
-        0                                            /* 命令 5：HEARTBEAT，无负载 */
+        0,                                           /* 命令 5：HEARTBEAT，无负载 */
+        6                                            /* 命令 6：AUTO_ARM，三个 uint16 */
     };
 
     /*
@@ -479,7 +698,7 @@ void Car_FeedByte(Car_Core *c, uint8_t byte)
 
         case 3:
             /* 状态 3：接收长度；命令号或长度非法时丢弃当前帧。 */
-            if (c->cmd < 1 || c->cmd > 5 || byte != lengths[c->cmd])
+            if (c->cmd < 1 || c->cmd > 6 || byte != lengths[c->cmd])
             {
                 c->parse_state = (byte == 0xC3) ? 1 : 0;
                 c->result = 3;                       /* 帧格式错误 */
@@ -577,6 +796,19 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
         Car_Fault(c, CAR_LINK_FAULT);
     }
 
+    if (c->vision_age_us < CAR_AUTO_MAX_AGE_MS * 1000U)
+    {
+        c->vision_age_us += dt_us;
+    }
+    if (c->state == CAR_RUN && c->mode == CAR_MODE_AUTO)
+    {
+        if (!auto_observation_ready(c) || c->auto_session != c->vision_session ||
+            !auto_targets(c))
+        {
+            Car_Fault(c, CAR_VISION_FAULT);
+        }
+    }
+
     /* 运行状态下推进双轮共享进度的五次参考曲线。 */
     if (c->state == CAR_RUN)
     {
@@ -589,7 +821,7 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
          * 计数增量 / 每圈计数 / 周期秒数 = 转/秒，
          * 再乘以 60 换算为每分钟转数（rpm）。
          */
-        float raw = (float)counts[i] * (60.0f / (CAR_ENCODER_CPR * dt));
+        float raw = (float)counts[i] * (60.0f / (c->cpr * dt));
         float abs_speed;                          /* 实测转速绝对值，rpm */
 
         /*
@@ -668,7 +900,7 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
          */
         if (c->reference[i] * c->speed[i] < 0.0f &&
             c->output[i] * c->speed[i] < 0.0f &&
-            absolute(c->output[i]) > 0.9f * CAR_PWM_LIMIT &&
+            absolute(c->output[i]) > 0.9f * c->pwm_limit &&
             abs_speed > 100.0f &&
             abs_speed >= c->slow_speed[i] - 5.0f)
         {

@@ -37,4 +37,81 @@ uint8_t Car_GetVisionObservation(CarVisionObservation *out);
  * @return 1 成功；0 参数无效或数据不可用，失败时不改写 out。
  */
 uint8_t Car_GetVisionTile(uint8_t index, CarVisionTile *out);
+
+/* ========================================================================== */
+/*                          板载菜单调试接口                                   */
+/* ========================================================================== */
+
+/* 控制快照：全部字段在临界区内一次拷贝，供主循环菜单显示。 */
+typedef struct
+{
+    uint8_t  state;              /* CAR_STOP / CAR_RUN / CAR_FAULT */
+    uint8_t  fault;              /* 故障码 */
+    uint8_t  mode;               /* CAR_MODE_MANUAL / CAR_MODE_AUTO */
+    uint8_t  result;             /* 最近命令结果 */
+    uint8_t  vision_present;     /* 1 表示有通过几何检查的视觉观测 */
+    uint16_t vision_sequence;
+    uint32_t vision_session;
+    uint32_t vision_age_ms;
+    float    vision_curvature;
+
+    float target[2];
+    float reference[2];
+    float speed[2];
+    float output[2];
+    float kp[2];
+    float ki[2];
+    float kd[2];
+
+    float rpm_limit;
+    float pwm_limit;
+    float accel_limit;
+    float jerk_limit;
+    float cpr;
+} CarDebugSnapshot;
+
+/**
+ * @brief 复制一份控制快照，调用时短暂屏蔽中断。
+ * @param out 非空输出；失败时不改写。
+ * @return 1 成功；0 参数无效。
+ */
+uint8_t Car_Debug_GetSnapshot(CarDebugSnapshot *out);
+
+/**
+ * @brief 停车时设置单轮 PID，参数校验与蓝牙 CMD4 相同。
+ * @return 1 成功；0 非停车、轮号或参数非法。
+ */
+uint8_t Car_Debug_SetPid(uint8_t wheel, float kp, float ki, float kd);
+
+/**
+ * @brief 停车时设置限速/PWM/加速度/加加速度。
+ * @return 1 成功；0 非停车或参数越界。
+ */
+uint8_t Car_Debug_SetLimits(float rpm_limit, float pwm_limit,
+                            float accel_limit, float jerk_limit);
+
+/**
+ * @brief 停车时设置编码器 CPR。
+ * @return 1 成功；0 非停车或参数非法。
+ */
+uint8_t Car_Debug_SetCpr(float cpr);
+
+/**
+ * @brief 菜单 STOP：等价于蓝牙 CMD2，清软件故障并回到停车。
+ * @note 不会消除硬件故障源，也不会保证车轮已物理停止。
+ */
+void Car_Debug_Stop(void);
+
+/**
+ * @brief 进入 Flash 擦写临界流程：仅允许 STOP，暂停 PIT 中断。
+ * @return 1 允许擦写；0 非 STOP，调用方不得写 Flash。
+ * @note 必须与 Car_Debug_FlashEnd() 成对调用；期间 SysTick 仍可运行。
+ */
+uint8_t Car_Debug_FlashBegin(void);
+
+/**
+ * @brief 结束 Flash 擦写：重建控制时基、清 PIT 挂起标志并恢复中断。
+ */
+void Car_Debug_FlashEnd(void);
+
 #endif

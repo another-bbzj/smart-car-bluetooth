@@ -63,6 +63,19 @@ int main(void)
     assert(CarVision_GetObservation(&v,0x10U,&o));
     assert(!CarVision_GetObservation(&v,0x100U,&o));
     CarVision_Invalidate(&v);assert(!CarVision_GetObservation(&v,0x100U,&o));
+    /* Native vision adapter uses right-positive pursuit curvature (type 3).
+     * Firmware normalizes it; legacy type 1 remains left-positive. */
+    {uint8_t native[16]={0,4,3,232,0,0,0,0,7,208,0,255,0,0,0,0};
+     CarVision_Init(&v);
+     n=make_frame(f,0,0,123,0,0,0);feed(&v,f,n,0,1);
+     n=make_frame(f,3,1,123,12,native,16);feed(&v,f,n,10,1);
+     assert(CarVision_GetObservation(&v,10,&o) && o.curvature_inv_m == -2.0f);
+     n=make_frame(f,1,2,123,12,native,16);feed(&v,f,n,20,1);
+     assert(CarVision_GetObservation(&v,20,&o) && o.curvature_inv_m == 2.0f);
+     native[1]=5; /* Do not reinterpret preview lateral position as cross-track error. */
+     n=make_frame(f,3,3,123,0,native,16);feed(&v,f,n,30,1);
+     assert(v.last_sequence==2);
+    }
     puts("vision interface: all checks passed");
     return 0;
 }

@@ -67,6 +67,11 @@ MDK-ARM/.team/
 
 # 本地临时目录、主题缓存与编辑器日志
 /tmp/
+/Vision/vision
+/Vision/test_frontend
+/Vision/test_run
+/Vision/test_vision_link
+/Vision/test_serial
 /vofa_dark/
 MDK-ARM/.vscode/
 

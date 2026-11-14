@@ -337,7 +337,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls></MiscControls>
+              <MiscControls>--locale=english</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx</Define>
               <Undefine></Undefine>
               <IncludePath>.;../Library/HAL_lib/Core/Inc;../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc;../Library/HAL_lib/STM32F4xx_HAL_Driver/Inc/Legacy;../Library/NEUQ_lib;../Library/NEUQ_lib/NEUQ_lib_APP;../Library/NEUQ_lib/NEUQ_lib_Debug;../Library/NEUQ_lib/NEUQ_lib_Device;../Library/NEUQ_lib/NEUQ_lib_Driver;../User;../CODE</IncludePath>
@@ -1058,6 +1058,46 @@
               <FileName>Car_Hardware.c</FileName>
               <FileType>1</FileType>
               <FilePath>../CODE/Car_Hardware.c</FilePath>
+            </File>
+            <File>
+              <FileName>Car_menu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/Car_menu.c</FilePath>
+            </File>
+            <File>
+              <FileName>Car_menu.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../CODE/Car_menu.h</FilePath>
+            </File>
+            <File>
+              <FileName>key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/key.c</FilePath>
+            </File>
+            <File>
+              <FileName>key.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../CODE/key.h</FilePath>
+            </File>
+            <File>
+              <FileName>Car_adc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/Car_adc.c</FilePath>
+            </File>
+            <File>
+              <FileName>Car_adc.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../CODE/Car_adc.h</FilePath>
+            </File>
+            <File>
+              <FileName>Car_params.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../CODE/Car_params.c</FilePath>
+            </File>
+            <File>
+              <FileName>Car_params.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../CODE/Car_params.h</FilePath>
             </File>
           </Files>
         </Group>

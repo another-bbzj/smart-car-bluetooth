@@ -313,7 +313,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
         return;
     }
 
-    if (type == 1 && len == 16)
+    if ((type == 1 || type == 3) && len == 16)
     {
         /* 道路观测帧：解析临时对象，全部校验通过后才覆盖缓存。 */
         CarVisionObservation o;                     /* 临时观测对象 */
@@ -323,6 +323,16 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
         int32_t curvature = i16(p + 8);             /* 曲率，线上单位 1/km */
         uint16_t flags = u16(p);                    /* 有效位掩码 */
         uint16_t confidence = u16(p + 2);           /* 置信度千分数 */
+
+        /* TYPE=3 复用原上位机的右正曲率，坐标适配放在下位机。
+         * 只允许曲率字段，避免把预瞄点偏移误解释成车体横向误差。 */
+        if (type == 3 && ((flags != 0 && flags != VISION_CURVATURE_VALID) ||
+            lateral != 0 || heading != 0 || p[10] != 0 || p[11] != 255 ||
+            u16(p + 12) != 0))
+        {
+            v->rejected_frames++;
+            return;
+        }
 
         /*
          * 即使某有效位未置位，对应线上数值仍须在协议范围内；
@@ -354,6 +364,7 @@ static void accept(CarVision *v, uint32_t now, uint8_t allow_hello)
         o.lateral_m = lateral / 1000.0f;            /* 横向偏差，米 */
         o.heading_rad = heading / 1000.0f;          /* 航向角，弧度 */
         o.curvature_inv_m = curvature / 1000.0f;    /* 曲率，1/米 */
+        if (type == 3) o.curvature_inv_m = -o.curvature_inv_m;
         o.distance_m = u16(p + 12) / 1000.0f;       /* 距离，米 */
         o.element = p[10];                          /* 元素类型 */
         o.tag_id = p[11];                           /* Tag 编号 */

@@ -1,0 +1,16 @@
+%YAML:1.0
+---
+# Provisional values, NOT calibrated on the venue. OpenCV H range: 0..179.
+white_max_s: 85
+white_min_v: 110
+blue_min_h: 90
+blue_max_h: 135
+blue_min_s: 70
+blue_min_v: 30
+close_kernel: 3
+max_hole_area: 1500
+seed_top_ratio: 0.55
+min_run_ratio: 0.12
+seed_margin: 5
+blue_probe: 12
+min_blue_ratio: 0.5
