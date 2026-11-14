@@ -178,4 +178,22 @@ uint8_t Car_Adc_IsLow(void);
  */
 uint8_t Car_Adc_IsCut(void);
 
+/**
+ * @brief 设置低电压报警阈值（菜单/持久化参数）。
+ * @param warn_mv 警告阈值，mV；cut_mv 严重低压阈值，mV。
+ * @return 1 成功；0 参数非法（cut > warn 或超出 1000~30000 mV）。
+ * @note 只改阈值，不清除当前报警状态；主循环上下文调用。
+ */
+uint8_t Car_Adc_SetThresholds(uint16_t warn_mv, uint16_t cut_mv);
+
+/**
+ * @brief 当前警告阈值，单位 mV。
+ */
+uint16_t Car_Adc_GetWarnThreshold(void);
+
+/**
+ * @brief 当前严重低压阈值，单位 mV。
+ */
+uint16_t Car_Adc_GetCutThreshold(void);
+
 #endif

@@ -73,9 +73,9 @@
 #define KEY_REPEAT_MS           120U
 #endif
 
-/* 双击开关：0 关闭，1 开启。 */
+/* 双击开关：0 关闭，1 开启。菜单要求按键立即响应，默认关闭双击。 */
 #ifndef KEY_ENABLE_DOUBLE_CLICK
-#define KEY_ENABLE_DOUBLE_CLICK 1
+#define KEY_ENABLE_DOUBLE_CLICK 0
 #endif
 
 /* 每个按键的事件队列深度，必须大于 1。 */

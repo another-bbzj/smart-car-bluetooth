@@ -1,4 +1,4 @@
-/* NEUQ SmartCar derivative; original NEUQ library Copyright (c) 2025
+ /* NEUQ SmartCar derivative; original NEUQ library Copyright (c) 2025
  * NEUQ SmartCar Lab, GPL-3.0-or-later. */
 
 /*
@@ -83,6 +83,9 @@ extern uint8_t UART_2_RX_dat;
 /* 左右轮编码器定时器句柄，来源：NEUQ_Encoder_init 初始化。 */
 extern TIM_HandleTypeDef Encoder_TIM3_Handle;
 extern TIM_HandleTypeDef Encoder_TIM4_Handle;
+
+/* PIT_CH1 的 TIM6 句柄，来源：NEUQ_PIT_init_ms 初始化。 */
+extern TIM_HandleTypeDef TIM_6_Handle;
 
 /* ========================================================================== */
 /*                             模块内部静态变量                                */
@@ -583,6 +586,178 @@ void Car_PIT_Handler(void)
          */
         My_Vofa_push(channels, 16);
     }
+}
+
+/* ========================================================================== */
+/*                            板载菜单调试接口                                 */
+/* ========================================================================== */
+
+/*
+ * 函数名称：Car_Debug_GetSnapshot
+ * 函数功能：在临界区内复制控制状态，供主循环菜单显示。
+ * 参数说明：out —— 非空输出对象；失败时不改写。
+ * 返回参数：1 成功；0 参数无效。
+ * 备注信息：只读快照，不暴露可修改的控制器指针。
+ */
+uint8_t Car_Debug_GetSnapshot(CarDebugSnapshot *out)
+{
+    uint32_t saved;
+    unsigned i;
+
+    if (out == NULL)
+    {
+        return 0U;
+    }
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+
+    out->state = car.state;
+    out->fault = car.fault;
+    out->mode = car.mode;
+    out->result = car.result;
+    out->vision_present = car.vision_present;
+    out->vision_sequence = car.vision_sequence;
+    out->vision_session = car.vision_session;
+    out->vision_age_ms = car.vision_age_us / 1000U;
+    out->vision_curvature = car.vision_curvature;
+
+    for (i = 0U; i < 2U; i++)
+    {
+        out->target[i] = car.target[i];
+        out->reference[i] = car.reference[i];
+        out->speed[i] = car.speed[i];
+        out->output[i] = car.output[i];
+        out->kp[i] = car.pid[i].kp;
+        out->ki[i] = car.pid[i].ki;
+        out->kd[i] = car.pid[i].kd;
+    }
+
+    out->rpm_limit = car.rpm_limit;
+    out->pwm_limit = car.pwm_limit;
+    out->accel_limit = car.accel_limit;
+    out->jerk_limit = car.jerk_limit;
+    out->cpr = car.cpr;
+
+    __set_PRIMASK(saved);
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Debug_SetPid
+ * 函数功能：停车时设置单轮 PID。
+ * 参数说明：wheel 0 左 / 1 右；kp/ki/kd 增益。
+ * 返回参数：1 成功；0 非停车或参数非法。
+ */
+uint8_t Car_Debug_SetPid(uint8_t wheel, float kp, float ki, float kd)
+{
+    uint32_t saved;
+    uint8_t ok;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+    ok = Car_Core_SetPid(&car, wheel, kp, ki, kd);
+    __set_PRIMASK(saved);
+    return ok;
+}
+
+/*
+ * 函数名称：Car_Debug_SetLimits
+ * 函数功能：停车时设置限速、PWM 限幅、参考加速度和加加速度。
+ * 返回参数：1 成功；0 非停车或参数越界。
+ */
+uint8_t Car_Debug_SetLimits(float rpm_limit, float pwm_limit,
+                            float accel_limit, float jerk_limit)
+{
+    uint32_t saved;
+    uint8_t ok;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+    ok = Car_Core_SetLimits(&car, rpm_limit, pwm_limit,
+                            accel_limit, jerk_limit);
+    __set_PRIMASK(saved);
+    return ok;
+}
+
+/*
+ * 函数名称：Car_Debug_SetCpr
+ * 函数功能：停车时设置编码器每输出轴一圈计数。
+ * 返回参数：1 成功；0 非停车或参数非法。
+ */
+uint8_t Car_Debug_SetCpr(float cpr)
+{
+    uint32_t saved;
+    uint8_t ok;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+    ok = Car_Core_SetCpr(&car, cpr);
+    __set_PRIMASK(saved);
+    return ok;
+}
+
+/*
+ * 函数名称：Car_Debug_Stop
+ * 函数功能：板载菜单 STOP，等价于蓝牙 CMD2。
+ * 备注信息：只清软件故障，不清硬件故障源。
+ */
+void Car_Debug_Stop(void)
+{
+    uint32_t saved;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+    Car_Core_Stop(&car);
+    __set_PRIMASK(saved);
+}
+
+/*
+ * 函数名称：Car_Debug_FlashBegin
+ * 函数功能：暂停 PIT，允许主循环擦写内部 Flash。
+ * 返回参数：1 允许；0 非 STOP。
+ * 备注信息：只关闭 TIM6 中断，SysTick 保持运行；擦除期间 CPU 仍会阻塞，
+ *           结束后由 Car_Debug_FlashEnd 重建控制时基。
+ */
+uint8_t Car_Debug_FlashBegin(void)
+{
+    uint32_t saved;
+    uint8_t ok;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+
+    ok = (car.state == CAR_STOP) ? 1U : 0U;
+    if (ok)
+    {
+        HAL_NVIC_DisableIRQ(TIM6_DAC_IRQn);
+    }
+
+    __set_PRIMASK(saved);
+    return ok;
+}
+
+/*
+ * 函数名称：Car_Debug_FlashEnd
+ * 函数功能：结束 Flash 擦写并重建控制时基。
+ * 备注信息：擦除会阻塞 CPU 数百毫秒，若不重置 last_control_us，
+ *           下一次 PIT 会把这段间隔误判为周期故障。
+ */
+void Car_Debug_FlashEnd(void)
+{
+    uint32_t saved;
+
+    saved = __get_PRIMASK();
+    __disable_irq();
+
+    last_control_us = control_clock_ready
+                    ? __HAL_TIM_GET_COUNTER(&control_clock)
+                    : 0U;
+    __HAL_TIM_CLEAR_FLAG(&TIM_6_Handle, TIM_FLAG_UPDATE);
+    HAL_NVIC_ClearPendingIRQ(TIM6_DAC_IRQn);
+    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
+
+    __set_PRIMASK(saved);
 }
 
 /* ========================================================================== */

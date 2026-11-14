@@ -110,6 +110,10 @@ static uint8_t adc_debounce;       /* 候选状态连续出现次数 */
 static uint32_t adc_last_ms;       /* 上一次采样时刻 */
 static uint8_t adc_started;        /* 1 表示已经完成首次采样 */
 
+/* 低电压阈值：初始来自 Car_adc.h，菜单可在停车时修改并持久化。 */
+static uint16_t adc_warn_mv = CAR_ADC_LOW_WARN_MV;
+static uint16_t adc_cut_mv = CAR_ADC_LOW_CUT_MV;
+
 /* 提前声明：Car_Adc_ApplyState() 在定义之前调用。 */
 static void Car_Adc_AlarmWrite(CarAdcState state);
 
@@ -190,32 +194,32 @@ static uint16_t Car_Adc_Filter(uint16_t sample)
  */
 static CarAdcState Car_Adc_NextState(uint16_t mv, CarAdcState current)
 {
-    if (mv <= CAR_ADC_LOW_CUT_MV)
+    if (mv <= adc_cut_mv)
     {
         return CAR_ADC_STATE_CUT;
     }
 
     if (current == CAR_ADC_STATE_CUT)
     {
-        if (mv < (uint16_t)(CAR_ADC_LOW_CUT_MV + CAR_ADC_HYSTERESIS_MV))
+        if (mv < (uint16_t)(adc_cut_mv + CAR_ADC_HYSTERESIS_MV))
         {
             return CAR_ADC_STATE_CUT;
         }
-        if (mv <= CAR_ADC_LOW_WARN_MV)
+        if (mv <= adc_warn_mv)
         {
             return CAR_ADC_STATE_WARN;
         }
         return CAR_ADC_STATE_NORMAL;
     }
 
-    if (mv <= CAR_ADC_LOW_WARN_MV)
+    if (mv <= adc_warn_mv)
     {
         return CAR_ADC_STATE_WARN;
     }
 
     if (current == CAR_ADC_STATE_WARN)
     {
-        if (mv < (uint16_t)(CAR_ADC_LOW_WARN_MV + CAR_ADC_HYSTERESIS_MV))
+        if (mv < (uint16_t)(adc_warn_mv + CAR_ADC_HYSTERESIS_MV))
         {
             return CAR_ADC_STATE_WARN;
         }
@@ -506,4 +510,35 @@ uint8_t Car_Adc_IsLow(void)
 uint8_t Car_Adc_IsCut(void)
 {
     return (adc_state == CAR_ADC_STATE_CUT) ? 1U : 0U;
+}
+
+/*
+ * 函数名称：Car_Adc_SetThresholds
+ * 函数功能：设置低电压警告/严重阈值。
+ * 参数说明：warn_mv 警告阈值；cut_mv 严重低压阈值，单位 mV。
+ * 返回参数：1 成功；0 参数非法。
+ * 备注信息：只改阈值，不清除当前报警状态；主循环上下文调用。
+ */
+uint8_t Car_Adc_SetThresholds(uint16_t warn_mv, uint16_t cut_mv)
+{
+    if (warn_mv < 1000U || warn_mv > 30000U ||
+        cut_mv < 1000U || cut_mv > 30000U ||
+        cut_mv > warn_mv)
+    {
+        return 0U;
+    }
+
+    adc_warn_mv = warn_mv;
+    adc_cut_mv = cut_mv;
+    return 1U;
+}
+
+uint16_t Car_Adc_GetWarnThreshold(void)
+{
+    return adc_warn_mv;
+}
+
+uint16_t Car_Adc_GetCutThreshold(void)
+{
+    return adc_cut_mv;
 }

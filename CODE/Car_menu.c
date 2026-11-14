@@ -5,384 +5,355 @@
  * ============================================================================
  * 文件名称：Car_menu.c
  * ============================================================================
- * 模块功能
- * ----------------------------------------------------------------------------
- * 链表式目录的建链、浏览和编辑核心。结构参考提交文件：
+ * 模块功能：现场调试链式菜单、按键浏览/编辑、LCD200 显示和 Flash 持久化。
  *
- *   1. MenuTable[] 只描述静态配置：name、parent_id、value、min/max/step；
- *   2. Car_Menu_BuildLink() 在运行时把 nodes[] 按 parent_id 建成
- *      父子关系和环形同级双向链表；
- *   3. page 是当前页面，selected 永远是 page 的子节点；
- *   4. editing = 0 浏览，editing = 1 编辑；
- *   5. UP/DOWN 在环形同级链表里移动，OK 进入/编辑，BACK 或双击 OK 返回，
- *      长按 OK / 长按 BACK 回到 MAIN。
+ *   显示：LCD200 横屏 320x240，ASCII_Font24（12x24），共 10 行。
+ *     行 0：目录路径（固定）
+ *     行 1：状态/故障/模式/电压/提示（固定）
+ *     行 2~9：列表 8 行；选中项到倒数第 3 行（行 7）后开始滚动。
  *
- *   一级目录固定四类：数独、香橙派、赛题元素PID、电池电压显示。
- *   MAIN 只是导航根页面，不属于第五类。
- *
- * 显示说明
- * ----------------------------------------------------------------------------
- *   LCD200 默认 Cross 横屏是 320x240；原 17 行竖屏布局超过 240 像素高度，
- *   属于显示 bug，已暂时移除渲染代码。本文件的建链/浏览/编辑不依赖 LCD。
- *
- * 函数列表（按文件内出现顺序）
- * ----------------------------------------------------------------------------
- *   static void menu_reset_params(void)
- *       —— 恢复菜单参数的默认值。
- *   uint8_t Car_Menu_BuildLink(void)
- *       —— 按 MenuTable[].parent_id 建立父子关系和环形同级链。
- *   uint8_t Car_Menu_ValidateLinks(void)
- *       —— 检查建链是否闭合。
- *   uint16_t Car_Menu_LinkErrorCount(void)
- *       —— 最近一次建链自检的错误数。
- *   void Car_Menu_Init(void)
- *       —— 初始化参数、建链、自检并初始化按键。
- *   uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
- *       —— 浏览/编辑状态机。
- *   void Car_Menu_Poll(void)
- *       —— 主循环周期任务。
- *   void Car_Menu_Render(void)
- *       —— 显示入口（暂时空实现）。
- *   uint8_t Car_Menu_Goto(MenuID id)
- *       —— 跳转到指定节点。
- *   MenuID Car_Menu_GetPageId(void)
- *       —— 当前页面编号。
- *   MenuID Car_Menu_GetSelectedId(void)
- *       —— 当前选中项编号。
- *   uint8_t Car_Menu_IsEditing(void)
- *       —— 是否处于编辑模式。
- *   int32_t Car_Menu_GetEditValue(void)
- *       —— 当前编辑值。
- *   void Car_Menu_SetEditValue(int32_t value)
- *       —— 设置编辑值并按范围限幅。
- *   const MenuConfig *Car_Menu_GetConfig(MenuID id)
- *       —— 取节点静态配置。
- *   int16_t Car_Menu_NodeCount(void)
- *       —— 节点总数。
+ *   安全：参数只在 STOP 时应用；动作节点必须长按 OK；Flash 擦写前后
+ *         由 Car_Debug_FlashBegin/End 暂停 PIT 并重建控制时基。
  * ============================================================================
  */
 
 #include "NEUQ_lib_include.h"
+#include "Car_Config.h"
+#include "Car_Core.h"
+#include "Car_Hardware.h"
+#include "Car_adc.h"
+#include "Car_params.h"
 #include "Car_menu.h"
 #include "key.h"
 
-/* ========================================================================== */
-/*                              可编辑参数                                     */
-/* ========================================================================== */
-
-CarMenuParams car_menu_params;
-
-/* ========================================================================== */
-/*                              静态配置表                                     */
-/* ========================================================================== */
-
-#define MENU_ITEM(name_, parent_, value_, min_, max_, step_, type_, skip_, lap_, score_, kalman_, status_, link_) \
-    { (name_), (parent_), (value_), (min_), (max_), (step_), (type_), (skip_), (lap_), (score_), (kalman_), (status_), (link_) }
-
-/*
- * 建链数据源：
- *   parent_id 决定父子关系；
- *   MENU_COUNT 的枚举顺序决定同级节点的初始排列顺序；
- *   value 非空表示该页面可以直接编辑参数。
- *
- * 主链层级：
- *   MAIN -> CAT_* -> 竞赛节点；
- *   N07 -> N08/N09/N10 构成路障颜色分支子链；
- *   CAT_PID 的同级顺序为 N01..N07、N11..N17、P01..P13。
- */
-static const MenuConfig MenuTable[MENU_COUNT] =
-{
-    [MAIN] = MENU_ITEM("MAIN", MENU_NONE, NULL, 0, 0, 0,
-                       CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                       0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-
-    [CAT_SUDOKU] = MENU_ITEM("SUDOKU", MAIN, NULL, 0, 0, 0,
-                             CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                             0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [CAT_ORANGEPI] = MENU_ITEM("ORANGE PI", MAIN, NULL, 0, 0, 0,
-                               CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                               0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [CAT_PID] = MENU_ITEM("RACE PID", MAIN, NULL, 0, 0, 0,
-                          CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                          0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [CAT_BATTERY] = MENU_ITEM("BATTERY", MAIN, NULL, 0, 0, 0,
-                              CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                              0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-
-    /* ---------------- 一级目录：数独 ---------------- */
-    [S01] = MENU_ITEM("SUDOKU OV", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S02] = MENU_ITEM("TILE CAPTURE", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S03] = MENU_ITEM("TAG CHECK", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S04] = MENU_ITEM("STITCH", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S05] = MENU_ITEM("SOLVE", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S06] = MENU_ITEM("DISPLAY", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S07] = MENU_ITEM("REWARD -25S", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S08] = MENU_ITEM("MASK NO REWARD", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P10),
-    [S09] = MENU_ITEM("SUDOKU PID", CAT_SUDOKU, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-
-    /* ---------------- 一级目录：香橙派 ---------------- */
-    [O01] = MENU_ITEM("BOARD LIMIT", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [O02] = MENU_ITEM("CAMERA", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [O03] = MENU_ITEM("PIPELINE", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [O04] = MENU_ITEM("SCHEDULER", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [O05] = MENU_ITEM("DEPLOY", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [O06] = MENU_ITEM("DATA FLOW", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
-    [O07] = MENU_ITEM("LOG", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [O08] = MENU_ITEM("SITE TBD", CAT_ORANGEPI, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_TBD, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_TBD, MENU_NONE),
-
-    /* ---------------- 一级目录：赛题元素PID ---------------- */
-    [N01] = MENU_ITEM("START", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [N02] = MENU_ITEM("LAP1 TIME", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P12),
-    [N03] = MENU_ITEM("TRACK", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, P01),
-    [N04] = MENU_ITEM("CROSS", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P04),
-    [N05] = MENU_ITEM("RING", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      45, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, P03),
-    [N06] = MENU_ITEM("160CM GAP", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      CAR_MENU_SCORE_INVALID, CAR_MENU_KALMAN_INDIRECT,
-                      CAR_MENU_STATUS_CONFIRMED, P06),
-    [N07] = MENU_ITEM("BLOCK DETECT", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P13),
-    [N08] = MENU_ITEM("GREEN PASS", N07, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P07),
-    [N09] = MENU_ITEM("YELLOW DETOUR", N07, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P08),
-    [N10] = MENU_ITEM("RED L1 PASS", N07, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P09),
-    [N11] = MENU_ITEM("LAP1 END", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P12),
-    [N12] = MENU_ITEM("LAP2 LOW", CAT_PID, &car_menu_params.speed_limit, 0, 500, 5,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
-    [N13] = MENU_ITEM("RED L2 STOP5", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
-                      10, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, P09),
-    [N14] = MENU_ITEM("SUDOKU", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_SCORE, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      -25, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P10),
-    [N15] = MENU_ITEM("BLIND BOX", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_PENALTY, CAR_MENU_SKIP_PARTIAL, CAR_MENU_LAP_SECOND,
-                      20, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, P11),
-    [N16] = MENU_ITEM("REAL STOP", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_BASIC, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, P11),
-    [N17] = MENU_ITEM("SCORE", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-
-    /* ---------------- 一级目录：赛题元素PID 的 PID 页 ---------------- */
-    [P01] = MENU_ITEM("PID STEER", CAT_PID, &car_menu_params.pid_kp, 0, 65535, 1,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P02] = MENU_ITEM("PID SPEED", CAT_PID, &car_menu_params.pid_ki, 0, 65535, 1,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P03] = MENU_ITEM("PID RING", CAT_PID, &car_menu_params.ring_speed, 0, 500, 5,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P04] = MENU_ITEM("PID CROSS", CAT_PID, &car_menu_params.kalman_q, 0, 100000, 10,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P05] = MENU_ITEM("PID CONE", CAT_PID, &car_menu_params.cone_offset, 0, 500, 5,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      15, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_TBD, MENU_NONE),
-    [P06] = MENU_ITEM("PID GAP", CAT_PID, &car_menu_params.gap_speed, 0, 500, 5,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P07] = MENU_ITEM("PID GREEN", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P08] = MENU_ITEM("PID YELLOW", CAT_PID, &car_menu_params.kalman_r, 0, 100000, 10,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_FIRST,
-                      0, CAR_MENU_KALMAN_YES, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P09] = MENU_ITEM("PID RED STOP", CAT_PID, &car_menu_params.red_stop_s, 1, 10, 1,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P10] = MENU_ITEM("PID SUDOKU", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_YES, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P11] = MENU_ITEM("PID BLIND", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_PARTIAL, CAR_MENU_LAP_SECOND,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_SITE, MENU_NONE),
-    [P12] = MENU_ITEM("PID STATE", CAT_PID, &car_menu_params.lap_mode, 0, 1, 1,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [P13] = MENU_ITEM("PID DISPATCH", CAT_PID, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-
-    /* ---------------- 一级目录：电池电压显示 ---------------- */
-    [B01] = MENU_ITEM("DIVIDER", CAT_BATTERY, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_HARDWARE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [B02] = MENU_ITEM("ADC FILTER", CAT_BATTERY, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [B03] = MENU_ITEM("VOLT DISPLAY", CAT_BATTERY, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, MENU_NONE),
-    [B04] = MENU_ITEM("LOW VOLT SAFE", CAT_BATTERY, &car_menu_params.battery_low,
-                      5000, 12600, 100,
-                      CAR_MENU_TYPE_RULE, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
-    [B05] = MENU_ITEM("SAFETY LINK", CAT_BATTERY, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_FLOW, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_INDIRECT, CAR_MENU_STATUS_CONFIRMED, P12),
-    [B06] = MENU_ITEM("SITE TBD", CAT_BATTERY, NULL, 0, 0, 0,
-                      CAR_MENU_TYPE_TBD, CAR_MENU_SKIP_NO, CAR_MENU_LAP_BOTH,
-                      0, CAR_MENU_KALMAN_NO, CAR_MENU_STATUS_TBD, MENU_NONE)
-};
-
-/* ========================================================================== */
-/*                              运行时节点                                     */
-/* ========================================================================== */
+#define MENU_TEXT_LEN       26U
+#define MENU_ROW_PX         24U
+#define MENU_SCREEN_W       320U
+#define MENU_SCREEN_H       240U
+#define MENU_LIST_ROWS      8U
+#define MENU_LIST_FIRST_ROW 2U
+#define MENU_SCROLL_ROW     5U   /* 列表第 6 行 = 屏幕第 8 行 = 倒数第 3 行 */
 
 typedef struct MenuNode
 {
-    const MenuConfig *info;  /* 节点静态配置 */
-    struct MenuNode *parent; /* 父节点 */
-    struct MenuNode *child;  /* 第一个子节点 */
-    struct MenuNode *prev;   /* 同级前驱（环形） */
-    struct MenuNode *next;   /* 同级后继（环形） */
+    MenuID id;
+    const MenuConfig *info;
+    struct MenuNode *parent;
+    struct MenuNode *child;
+    struct MenuNode *prev;
+    struct MenuNode *next;
 } MenuNode;
 
-static MenuNode nodes[MENU_COUNT]; /* 固定内存，不申请堆 */
-static MenuNode *page;              /* 当前页面 */
-static MenuNode *selected;          /* 当前选中项，永远是 page 的子节点 */
-static uint8_t editing;             /* 0 浏览，1 编辑 */
-static int32_t edit_value;          /* 编辑中的临时值 */
-static uint16_t menu_link_errors;   /* 建链自检错误数 */
+CarMenuParams car_menu_params;
 
-/* ========================================================================== */
-/*                              内部函数                                       */
-/* ========================================================================== */
+#define MENU_ITEM(name_, parent_, value_, min_, max_, step_, fmt_, act_) \
+    { (name_), (parent_), (value_), (min_), (max_), (step_), (fmt_), (act_) }
+#define MENU_PAGE(name_, parent_) \
+    MENU_ITEM((name_), (parent_), NULL, 0, 0, 0, CAR_MENU_FMT_INT, CAR_MENU_ACT_NONE)
+#define MENU_PARAM(name_, parent_, ptr_, min_, max_, step_, fmt_) \
+    MENU_ITEM((name_), (parent_), (ptr_), (min_), (max_), (step_), (fmt_), CAR_MENU_ACT_NONE)
+#define MENU_ACTION(name_, parent_, act_) \
+    MENU_ITEM((name_), (parent_), NULL, 0, 0, 0, CAR_MENU_FMT_INT, (act_))
 
 /*
- * 函数名称：menu_reset_params
- * 函数功能：恢复菜单可编辑参数的默认值。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     menu_reset_params();
- * 备注信息：这些值只是菜单侧的初始值；控制层是否采用由上层决定。
+ * 静态配置表。parent_id 决定层级，枚举顺序决定同级显示顺序。
+ * 参数地址指向 car_menu_params；修改后由 Car_Menu_ApplyParams 写入控制量。
  */
-static void menu_reset_params(void)
+static const MenuConfig MenuTable[MENU_COUNT] =
 {
-    car_menu_params.pid_kp = 200;       /* 2.00 */
-    car_menu_params.pid_ki = 12;        /* 0.12 */
-    car_menu_params.pid_kd = 0;
-    car_menu_params.kalman_q = 100;     /* 0.100 */
-    car_menu_params.kalman_r = 1000;    /* 1.000 */
-    car_menu_params.lap_mode = 0;       /* 第一圈 */
-    car_menu_params.speed_limit = 180;  /* rpm */
-    car_menu_params.ring_speed = 120;   /* rpm */
-    car_menu_params.cone_offset = 150;  /* mm */
-    car_menu_params.red_stop_s = 5;     /* s */
-    car_menu_params.gap_speed = 160;    /* rpm */
-    car_menu_params.battery_low = 6600; /* mV */
+    [MAIN] = MENU_PAGE("MAIN", MENU_NONE),
+
+    [CAT_STATUS] = MENU_PAGE("STATUS", MAIN),
+    [CAT_TUNE] = MENU_PAGE("TUNE", MAIN),
+    [CAT_ACTIONS] = MENU_PAGE("ACTIONS", MAIN),
+    [CAT_INFO] = MENU_PAGE("INFO", MAIN),
+
+    [ST_STATE] = MENU_PAGE("STATE", CAT_STATUS),
+    [ST_FAULT] = MENU_PAGE("FAULT", CAT_STATUS),
+    [ST_MODE] = MENU_PAGE("MODE", CAT_STATUS),
+    [ST_SPD_L] = MENU_PAGE("L SPEED", CAT_STATUS),
+    [ST_SPD_R] = MENU_PAGE("R SPEED", CAT_STATUS),
+    [ST_REF_L] = MENU_PAGE("L REF", CAT_STATUS),
+    [ST_REF_R] = MENU_PAGE("R REF", CAT_STATUS),
+    [ST_OUT_L] = MENU_PAGE("L OUT", CAT_STATUS),
+    [ST_OUT_R] = MENU_PAGE("R OUT", CAT_STATUS),
+    [ST_VISION] = MENU_PAGE("VISION", CAT_STATUS),
+    [ST_BATT] = MENU_PAGE("BATTERY", CAT_STATUS),
+
+    [TU_PID_L] = MENU_PAGE("PID LEFT", CAT_TUNE),
+    [TU_PID_R] = MENU_PAGE("PID RIGHT", CAT_TUNE),
+    [TU_LIMITS] = MENU_PAGE("LIMITS", CAT_TUNE),
+    [TU_ENC] = MENU_PAGE("ENCODER", CAT_TUNE),
+    [TU_BATT] = MENU_PAGE("BAT THRESH", CAT_TUNE),
+
+    [PL_KP] = MENU_PARAM("L KP", TU_PID_L, &car_menu_params.kp_x100[0],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+    [PL_KI] = MENU_PARAM("L KI", TU_PID_L, &car_menu_params.ki_x100[0],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+    [PL_KD] = MENU_PARAM("L KD", TU_PID_L, &car_menu_params.kd_x100[0],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+    [PR_KP] = MENU_PARAM("R KP", TU_PID_R, &car_menu_params.kp_x100[1],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+    [PR_KI] = MENU_PARAM("R KI", TU_PID_R, &car_menu_params.ki_x100[1],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+    [PR_KD] = MENU_PARAM("R KD", TU_PID_R, &car_menu_params.kd_x100[1],
+                         0, 65535, 1, CAR_MENU_FMT_X100),
+
+    [LM_RPM] = MENU_PARAM("RPM LIMIT", TU_LIMITS, &car_menu_params.rpm_limit,
+                          10, 300, 5, CAR_MENU_FMT_INT),
+    [LM_PWM] = MENU_PARAM("PWM LIMIT", TU_LIMITS, &car_menu_params.pwm_limit,
+                          100, 10000, 50, CAR_MENU_FMT_INT),
+    [LM_ACC] = MENU_PARAM("ACCEL", TU_LIMITS, &car_menu_params.accel_limit,
+                          10, 5000, 10, CAR_MENU_FMT_INT),
+    [LM_JERK] = MENU_PARAM("JERK", TU_LIMITS, &car_menu_params.jerk_limit,
+                           10, 20000, 50, CAR_MENU_FMT_INT),
+
+    [EN_CPR] = MENU_PARAM("CPR X10", TU_ENC, &car_menu_params.cpr_x10,
+                          100, 1000000, 10, CAR_MENU_FMT_X10),
+
+    [BT_WARN] = MENU_PARAM("WARN MV", TU_BATT, &car_menu_params.batt_warn_mv,
+                           1000, 30000, 100, CAR_MENU_FMT_MV),
+    [BT_CUT] = MENU_PARAM("CUT MV", TU_BATT, &car_menu_params.batt_cut_mv,
+                          1000, 30000, 100, CAR_MENU_FMT_MV),
+
+    [AC_STOP] = MENU_ACTION("STOP/CLEAR", CAT_ACTIONS, CAR_MENU_ACT_STOP),
+    [AC_SAVE] = MENU_ACTION("SAVE FLASH", CAT_ACTIONS, CAR_MENU_ACT_SAVE),
+    [AC_LOAD] = MENU_ACTION("LOAD FLASH", CAT_ACTIONS, CAR_MENU_ACT_LOAD),
+    [AC_DEF] = MENU_ACTION("DEFAULTS", CAT_ACTIONS, CAR_MENU_ACT_DEFAULTS),
+
+    [IN_FW] = MENU_PAGE("FW VERSION", CAT_INFO),
+    [IN_NODES] = MENU_PAGE("NODE COUNT", CAT_INFO),
+    [IN_LINK] = MENU_PAGE("LINK ERR", CAT_INFO),
+    [IN_FLASH] = MENU_PAGE("FLASH", CAT_INFO)
+};
+
+static MenuNode nodes[MENU_COUNT];
+static MenuNode *page;
+static MenuNode *selected;
+static uint8_t editing;
+static int32_t edit_value;
+static int16_t scroll_offset;
+static uint16_t link_errors;
+static uint8_t menu_dirty;
+static uint8_t flash_present;
+static uint32_t message_until;
+static char menu_message[MENU_TEXT_LEN + 1U];
+static char shown[10][MENU_TEXT_LEN + 1U];
+
+/* ========================================================================== */
+/*                              内部工具                                       */
+/* ========================================================================== */
+
+static void menu_copy(char *dst, const char *src, unsigned n)
+{
+    unsigned i = 0U;
+
+    if (n == 0U)
+    {
+        return;
+    }
+
+    while (i + 1U < n && src[i] != '\0')
+    {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void menu_message_set(const char *text)
+{
+    menu_copy(menu_message, text, sizeof(menu_message));
+    message_until = HAL_GetTick() + 1500U;
+    menu_dirty = 1U;
+}
+
+static uint8_t menu_message_active(void)
+{
+    return ((int32_t)(HAL_GetTick() - message_until) < 0) ? 1U : 0U;
+}
+
+static int32_t menu_abs32(int32_t v)
+{
+    return (v < 0) ? -v : v;
+}
+
+static void menu_format_value(const MenuConfig *cfg, int32_t value,
+                              char *out, unsigned n)
+{
+    int32_t whole;
+    int32_t frac;
+
+    switch (cfg->format)
+    {
+        case CAR_MENU_FMT_X100:
+            whole = value / 100;
+            frac = menu_abs32(value % 100);
+            (void)snprintf(out, n, "%d.%02d", (int)whole, (int)frac);
+            break;
+
+        case CAR_MENU_FMT_X10:
+            whole = value / 10;
+            frac = menu_abs32(value % 10);
+            (void)snprintf(out, n, "%d.%d", (int)whole, (int)frac);
+            break;
+
+        default:
+            (void)snprintf(out, n, "%d", (int)value);
+            break;
+    }
+}
+
+static const char *menu_state_name(uint8_t state)
+{
+    switch (state)
+    {
+        case CAR_RUN: return "RUN";
+        case CAR_FAULT: return "FAULT";
+        default: return "STOP";
+    }
+}
+
+static const char *menu_mode_name(uint8_t mode)
+{
+    return (mode == CAR_MODE_AUTO) ? "AUTO" : "MANUAL";
+}
+
+static const char *menu_fault_name(uint8_t fault)
+{
+    switch (fault)
+    {
+        case 0: return "NONE";
+        case 1: return "LINK";
+        case 2: return "STALL";
+        case 3: return "DIR";
+        case 4: return "RX";
+        case 5: return "TIMING";
+        case 6: return "CTRL";
+        case 7: return "VISION";
+        default: return "?";
+    }
+}
+
+static void menu_status_value(MenuID id, const CarDebugSnapshot *s,
+                              char *out, unsigned n)
+{
+    uint16_t mv;
+    CarAdcState adc_state;
+
+    switch (id)
+    {
+        case ST_STATE:
+            menu_copy(out, menu_state_name(s->state), n);
+            break;
+        case ST_FAULT:
+            (void)snprintf(out, n, "%u %s", (unsigned)s->fault,
+                           menu_fault_name(s->fault));
+            break;
+        case ST_MODE:
+            menu_copy(out, menu_mode_name(s->mode), n);
+            break;
+        case ST_SPD_L:
+            (void)snprintf(out, n, "%d.%d RPM", (int)(s->speed[0]),
+                           (int)(menu_abs32((int32_t)(s->speed[0] * 10.0f)) % 10));
+            break;
+        case ST_SPD_R:
+            (void)snprintf(out, n, "%d.%d RPM", (int)(s->speed[1]),
+                           (int)(menu_abs32((int32_t)(s->speed[1] * 10.0f)) % 10));
+            break;
+        case ST_REF_L:
+            (void)snprintf(out, n, "%d.%d RPM", (int)(s->reference[0]),
+                           (int)(menu_abs32((int32_t)(s->reference[0] * 10.0f)) % 10));
+            break;
+        case ST_REF_R:
+            (void)snprintf(out, n, "%d.%d RPM", (int)(s->reference[1]),
+                           (int)(menu_abs32((int32_t)(s->reference[1] * 10.0f)) % 10));
+            break;
+        case ST_OUT_L:
+            (void)snprintf(out, n, "%d.%d %%", (int)(s->output[0] / 100.0f),
+                           (int)(menu_abs32((int32_t)(s->output[0] / 10.0f)) % 10));
+            break;
+        case ST_OUT_R:
+            (void)snprintf(out, n, "%d.%d %%", (int)(s->output[1] / 100.0f),
+                           (int)(menu_abs32((int32_t)(s->output[1] / 10.0f)) % 10));
+            break;
+        case ST_VISION:
+            (void)snprintf(out, n, "%s %uMS Q%u",
+                           s->vision_present ? "ON" : "OFF",
+                           (unsigned)s->vision_age_ms,
+                           (unsigned)s->vision_sequence);
+            break;
+        case ST_BATT:
+            mv = Car_Adc_GetFilteredMv();
+            adc_state = Car_Adc_GetState();
+            (void)snprintf(out, n, "%u.%uV %s", (unsigned)(mv / 1000U),
+                           (unsigned)((mv % 1000U) / 100U),
+                           (adc_state == CAR_ADC_STATE_CUT) ? "CUT" :
+                           (adc_state == CAR_ADC_STATE_WARN) ? "WARN" : "OK");
+            break;
+        default:
+            out[0] = '\0';
+            break;
+    }
+}
+
+static void menu_info_value(MenuID id, char *out, unsigned n)
+{
+    switch (id)
+    {
+        case IN_FW:
+            menu_copy(out, "MENU 1.0", n);
+            break;
+        case IN_NODES:
+            (void)snprintf(out, n, "%u", (unsigned)MENU_COUNT);
+            break;
+        case IN_LINK:
+            (void)snprintf(out, n, "%u", (unsigned)link_errors);
+            break;
+        case IN_FLASH:
+            menu_copy(out, flash_present ? "SAVED" : "EMPTY", n);
+            break;
+        default:
+            out[0] = '\0';
+            break;
+    }
 }
 
 /* ========================================================================== */
 /*                              建链与自检                                     */
 /* ========================================================================== */
 
-/*
- * 函数名称：Car_Menu_BuildLink
- * 函数功能：按 MenuTable[].parent_id 建立父子关系和环形同级双向链表。
- * 参数说明：无。
- * 返回参数：1 成功；0 parent_id 非法或自引用。
- * 使用示例：
- *     Car_Menu_BuildLink();
- * 备注信息：节点内存固定为 nodes[MENU_COUNT]，不需要 malloc；
- *           同级链首尾相接，UP/DOWN 到头自动回绕。
- */
 uint8_t Car_Menu_BuildLink(void)
 {
-    uint16_t errors = 0U;
     int i;
 
-    for (i = 0; i < MENU_COUNT; i++)
+    for (i = 0; i < (int)MENU_COUNT; i++)
     {
+        nodes[i].id = (MenuID)i;
         nodes[i].info = &MenuTable[i];
         nodes[i].parent = NULL;
         nodes[i].child = NULL;
-        nodes[i].prev = NULL;
-        nodes[i].next = NULL;
+        nodes[i].prev = &nodes[i];
+        nodes[i].next = &nodes[i];
     }
 
-    for (i = 0; i < MENU_COUNT; i++)
+    for (i = 1; i < (int)MENU_COUNT; i++)
     {
         MenuID parent_id = MenuTable[i].parent_id;
-        MenuNode *node;
+        MenuNode *node = &nodes[i];
         MenuNode *parent;
-        MenuNode *first;
         MenuNode *last;
 
-        if (parent_id == MENU_NONE)
+        if (parent_id <= MENU_NONE || parent_id >= MENU_COUNT ||
+            parent_id == (MenuID)i)
         {
-            continue;
+            return 0U;
         }
 
-        if (parent_id < 0 || parent_id >= MENU_COUNT || (int)parent_id == i)
-        {
-            errors++;
-            continue;
-        }
-
-        node = &nodes[i];
         parent = &nodes[parent_id];
         node->parent = parent;
 
-        first = parent->child;
-        if (first == NULL)
+        if (parent->child == NULL)
         {
             parent->child = node;
             node->prev = node;
@@ -390,168 +361,363 @@ uint8_t Car_Menu_BuildLink(void)
         }
         else
         {
-            last = first->prev;
-            node->prev = last;
+            last = parent->child->prev;
             last->next = node;
-            node->next = first;
-            first->prev = node;
+            node->prev = last;
+            node->next = parent->child;
+            parent->child->prev = node;
         }
     }
 
-    menu_link_errors = errors;
-    return (errors == 0U) ? 1U : 0U;
+    return 1U;
 }
 
-/*
- * 函数名称：Car_Menu_ValidateLinks
- * 函数功能：检查建链是否闭合、同级链是否环形、父链是否可达 MAIN。
- * 参数说明：无。
- * 返回参数：1 通过；0 存在错误。
- * 使用示例：
- *     if (!Car_Menu_ValidateLinks())
- *     {
- *         // 建链错误
- *     }
- * 备注信息：只读检查，不修改 nodes[]；结果写入 menu_link_errors。
- */
-uint8_t Car_Menu_ValidateLinks(void)
+static uint8_t menu_node_reaches_main(const MenuNode *node)
 {
-    uint16_t errors = 0U;
-    int i;
-    int root_count = 0;
+    unsigned depth = 0U;
 
-    for (i = 0; i < MENU_COUNT; i++)
+    while (node != NULL && node->id != MAIN && depth < MENU_COUNT)
     {
-        const MenuConfig *config = &MenuTable[i];
-
-        if (nodes[i].info != config)
-        {
-            errors++;
-        }
-
-        if (config->parent_id == MENU_NONE)
-        {
-            root_count++;
-            if (nodes[i].parent != NULL)
-            {
-                errors++;
-            }
-        }
-        else if (config->parent_id < 0 || config->parent_id >= MENU_COUNT)
-        {
-            errors++;
-        }
-        else if (nodes[i].parent != &nodes[config->parent_id])
-        {
-            errors++;
-        }
-
-        if (config->value != NULL)
-        {
-            if (config->min > config->max || config->step <= 0)
-            {
-                errors++;
-            }
-        }
-
-        if (config->pid_link != MENU_NONE &&
-            (config->pid_link < 0 || config->pid_link >= MENU_COUNT))
-        {
-            errors++;
-        }
+        node = node->parent;
+        depth++;
     }
 
-    if (root_count != 1 || nodes[MAIN].parent != NULL)
+    return (node != NULL && node->id == MAIN) ? 1U : 0U;
+}
+
+uint8_t Car_Menu_ValidateLinks(void)
+{
+    unsigned i;
+    unsigned errors = 0U;
+
+    if (nodes[MAIN].parent != NULL)
     {
         errors++;
     }
 
-    for (i = 0; i < MENU_COUNT; i++)
+    for (i = 1U; i < MENU_COUNT; i++)
     {
-        MenuNode *first = nodes[i].child;
+        const MenuConfig *cfg = nodes[i].info;
 
-        if (first != NULL)
+        if (nodes[i].parent == NULL || nodes[i].parent->id != cfg->parent_id)
         {
-            MenuNode *current = first;
-            uint16_t count = 0U;
-
-            do
-            {
-                if (current->parent != &nodes[i] ||
-                    current->next == NULL || current->next->prev != current ||
-                    current->prev == NULL || current->prev->next != current)
-                {
-                    errors++;
-                    break;
-                }
-
-                current = current->next;
-                count++;
-            } while (current != first && count < (uint16_t)MENU_COUNT);
-
-            if (current != first || count == 0U)
+            errors++;
+        }
+        if (nodes[i].next == NULL || nodes[i].prev == NULL ||
+            nodes[i].next->prev != &nodes[i] ||
+            nodes[i].prev->next != &nodes[i])
+        {
+            errors++;
+        }
+        if (!menu_node_reaches_main(&nodes[i]))
+        {
+            errors++;
+        }
+        if (cfg->value != NULL)
+        {
+            if (cfg->min > cfg->max || cfg->step <= 0 ||
+                cfg->action != CAR_MENU_ACT_NONE)
             {
                 errors++;
             }
         }
-    }
-
-    for (i = 1; i < MENU_COUNT; i++)
-    {
-        const MenuNode *current = &nodes[i];
-        uint16_t depth = 0U;
-
-        while (current->parent != NULL)
-        {
-            current = current->parent;
-            depth++;
-            if (depth > (uint16_t)MENU_COUNT)
-            {
-                errors++;
-                break;
-            }
-        }
-
-        if (current != &nodes[MAIN])
+        if (cfg->action != CAR_MENU_ACT_NONE && cfg->value != NULL)
         {
             errors++;
         }
     }
 
-    menu_link_errors = errors;
+    link_errors = (uint16_t)errors;
     return (errors == 0U) ? 1U : 0U;
 }
 
-/*
- * 函数名称：Car_Menu_LinkErrorCount
- * 函数功能：返回最近一次建链自检发现的错误数量。
- * 参数说明：无。
- * 返回参数：错误数；0 表示通过。
- * 使用示例：
- *     uint16_t errors = Car_Menu_LinkErrorCount();
- * 备注信息：每次 Car_Menu_BuildLink() 或 Car_Menu_ValidateLinks() 后更新。
- */
 uint16_t Car_Menu_LinkErrorCount(void)
 {
-    return menu_link_errors;
+    return link_errors;
 }
 
 /* ========================================================================== */
-/*                              浏览与编辑                                     */
+/*                              参数应用                                       */
 /* ========================================================================== */
 
-/*
- * 函数名称：Car_Menu_Update
- * 函数功能：根据按键事件推进浏览或编辑状态机。
- * 参数说明：key   —— 按键编号（KEY_UP/KEY_DOWN/KEY_OK/KEY_BACK）；
- *           event —— 按键事件。
- * 返回参数：1 状态改变；0 忽略。
- * 使用示例：
- *     Car_Menu_Update(KEY_OK, KEY_EVENT_SINGLE_CLICK);
- * 备注信息：浏览模式下 UP/DOWN 移动，OK 进入/编辑，BACK 或双击 OK 返回，
- *           长按 OK / 长按 BACK 回到 MAIN；编辑模式下 UP/DOWN 调整，
- *           OK 提交，BACK 或双击 OK 取消。
- */
+static void menu_params_default(void)
+{
+    unsigned i;
+
+    for (i = 0U; i < 2U; i++)
+    {
+        car_menu_params.kp_x100[i] = (int32_t)(CAR_DEFAULT_KP * 100.0f + 0.5f);
+        car_menu_params.ki_x100[i] = (int32_t)(CAR_DEFAULT_KI * 100.0f + 0.5f);
+        car_menu_params.kd_x100[i] = (int32_t)(CAR_DEFAULT_KD * 100.0f + 0.5f);
+    }
+
+    car_menu_params.rpm_limit = (int32_t)CAR_RPM_LIMIT;
+    car_menu_params.pwm_limit = (int32_t)CAR_PWM_LIMIT;
+    car_menu_params.accel_limit = (int32_t)CAR_ACCEL_LIMIT_RPM_S;
+    car_menu_params.jerk_limit = (int32_t)CAR_JERK_LIMIT_RPM_S2;
+    car_menu_params.cpr_x10 = (int32_t)(CAR_ENCODER_CPR * 10.0f + 0.5f);
+    car_menu_params.batt_warn_mv = (int32_t)CAR_ADC_LOW_WARN_MV;
+    car_menu_params.batt_cut_mv = (int32_t)CAR_ADC_LOW_CUT_MV;
+}
+
+uint8_t Car_Menu_ApplyParams(void)
+{
+    unsigned i;
+
+    if (!Car_Debug_SetLimits((float)car_menu_params.rpm_limit,
+                             (float)car_menu_params.pwm_limit,
+                             (float)car_menu_params.accel_limit,
+                             (float)car_menu_params.jerk_limit))
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < 2U; i++)
+    {
+        if (!Car_Debug_SetPid((uint8_t)i,
+                              (float)car_menu_params.kp_x100[i] / 100.0f,
+                              (float)car_menu_params.ki_x100[i] / 100.0f,
+                              (float)car_menu_params.kd_x100[i] / 100.0f))
+        {
+            return 0U;
+        }
+    }
+
+    if (!Car_Debug_SetCpr((float)car_menu_params.cpr_x10 / 10.0f))
+    {
+        return 0U;
+    }
+
+    if (!Car_Adc_SetThresholds((uint16_t)car_menu_params.batt_warn_mv,
+                               (uint16_t)car_menu_params.batt_cut_mv))
+    {
+        return 0U;
+    }
+
+    return 1U;
+}
+
+static void menu_params_from_flash(const CarParams *p)
+{
+    unsigned i;
+
+    for (i = 0U; i < 2U; i++)
+    {
+        car_menu_params.kp_x100[i] = p->kp_x100[i];
+        car_menu_params.ki_x100[i] = p->ki_x100[i];
+        car_menu_params.kd_x100[i] = p->kd_x100[i];
+    }
+
+    car_menu_params.rpm_limit = p->rpm_limit;
+    car_menu_params.pwm_limit = p->pwm_limit;
+    car_menu_params.accel_limit = p->accel_limit;
+    car_menu_params.jerk_limit = p->jerk_limit;
+    car_menu_params.cpr_x10 = p->cpr_x10;
+    car_menu_params.batt_warn_mv = p->batt_warn_mv;
+    car_menu_params.batt_cut_mv = p->batt_cut_mv;
+}
+
+static void menu_params_to_flash(CarParams *p)
+{
+    unsigned i;
+
+    Car_Params_Default(p);
+
+    for (i = 0U; i < 2U; i++)
+    {
+        p->kp_x100[i] = car_menu_params.kp_x100[i];
+        p->ki_x100[i] = car_menu_params.ki_x100[i];
+        p->kd_x100[i] = car_menu_params.kd_x100[i];
+    }
+
+    p->rpm_limit = car_menu_params.rpm_limit;
+    p->pwm_limit = car_menu_params.pwm_limit;
+    p->accel_limit = car_menu_params.accel_limit;
+    p->jerk_limit = car_menu_params.jerk_limit;
+    p->cpr_x10 = car_menu_params.cpr_x10;
+    p->batt_warn_mv = car_menu_params.batt_warn_mv;
+    p->batt_cut_mv = car_menu_params.batt_cut_mv;
+}
+
+uint8_t Car_Menu_SaveParams(void)
+{
+    CarParams params;
+    uint8_t ok;
+
+    menu_params_to_flash(&params);
+
+    if (!Car_Debug_FlashBegin())
+    {
+        return 0U;
+    }
+
+    ok = Car_Params_Save(&params);
+    Car_Debug_FlashEnd();
+
+    flash_present = Car_Params_IsPresent();
+    return ok;
+}
+
+uint8_t Car_Menu_LoadParams(void)
+{
+    CarParams params;
+    CarMenuParams saved = car_menu_params;
+
+    if (!Car_Params_Load(&params))
+    {
+        flash_present = 0U;
+        return 0U;
+    }
+
+    menu_params_from_flash(&params);
+    if (!Car_Menu_ApplyParams())
+    {
+        car_menu_params = saved;
+        (void)Car_Menu_ApplyParams();
+        return 0U;
+    }
+
+    flash_present = 1U;
+    return 1U;
+}
+
+/* ========================================================================== */
+/*                              浏览/编辑状态机                                 */
+/* ========================================================================== */
+
+static int16_t menu_child_count(const MenuNode *parent)
+{
+    int16_t count = 0;
+    MenuNode *n;
+
+    if (parent == NULL || parent->child == NULL)
+    {
+        return 0;
+    }
+
+    n = parent->child;
+    do
+    {
+        count++;
+        n = n->next;
+    } while (n != parent->child && count < (int16_t)MENU_COUNT);
+
+    return count;
+}
+
+static int16_t menu_child_index(const MenuNode *parent, const MenuNode *node)
+{
+    int16_t index = 0;
+    MenuNode *n;
+
+    if (parent == NULL || parent->child == NULL || node == NULL)
+    {
+        return 0;
+    }
+
+    n = parent->child;
+    do
+    {
+        if (n == node)
+        {
+            return index;
+        }
+        index++;
+        n = n->next;
+    } while (n != parent->child && index < (int16_t)MENU_COUNT);
+
+    return 0;
+}
+
+static MenuNode *menu_child_at(const MenuNode *parent, int16_t index)
+{
+    int16_t i = 0;
+    MenuNode *n;
+
+    if (parent == NULL || parent->child == NULL || index < 0)
+    {
+        return NULL;
+    }
+
+    n = parent->child;
+    do
+    {
+        if (i == index)
+        {
+            return n;
+        }
+        i++;
+        n = n->next;
+    } while (n != parent->child && i < (int16_t)MENU_COUNT);
+
+    return NULL;
+}
+
+static void menu_scroll_adjust(void)
+{
+    int16_t index = menu_child_index(page, selected);
+    int16_t count = menu_child_count(page);
+    int16_t max_offset = (count > (int16_t)MENU_LIST_ROWS)
+                       ? (int16_t)(count - (int16_t)MENU_LIST_ROWS) : 0;
+
+    if (index < scroll_offset)
+    {
+        scroll_offset = index;
+    }
+    if (index > (int16_t)(scroll_offset + (int16_t)MENU_SCROLL_ROW))
+    {
+        scroll_offset = (int16_t)(index - (int16_t)MENU_SCROLL_ROW);
+    }
+    if (scroll_offset < 0)
+    {
+        scroll_offset = 0;
+    }
+    if (scroll_offset > max_offset)
+    {
+        scroll_offset = max_offset;
+    }
+}
+
+static uint8_t menu_can_edit(void)
+{
+    CarDebugSnapshot snapshot;
+
+    if (!Car_Debug_GetSnapshot(&snapshot))
+    {
+        return 0U;
+    }
+
+    return (snapshot.state == CAR_STOP) ? 1U : 0U;
+}
+
+static void menu_action_run(CarMenuAction action)
+{
+    switch (action)
+    {
+        case CAR_MENU_ACT_STOP:
+            Car_Debug_Stop();
+            menu_message_set("STOPPED");
+            break;
+
+        case CAR_MENU_ACT_SAVE:
+            menu_message_set(Car_Menu_SaveParams() ? "SAVED" : "SAVE FAIL");
+            break;
+
+        case CAR_MENU_ACT_LOAD:
+            menu_message_set(Car_Menu_LoadParams() ? "LOADED" : "LOAD FAIL");
+            break;
+
+        case CAR_MENU_ACT_DEFAULTS:
+            menu_params_default();
+            menu_message_set(Car_Menu_ApplyParams() ? "DEFAULTS" : "STOP FIRST");
+            flash_present = Car_Params_IsPresent();
+            break;
+
+        default:
+            break;
+    }
+}
+
 uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
 {
     if (page == NULL || selected == NULL)
@@ -573,7 +739,8 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
         switch (key)
         {
             case KEY_UP:
-                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT ||
+                    event == KEY_EVENT_LONG_PRESS)
                 {
                     next = edit_value + item->step;
                     if (next > item->max)
@@ -583,13 +750,15 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                     if (next != edit_value)
                     {
                         edit_value = next;
+                        menu_dirty = 1U;
                         return 1U;
                     }
                 }
                 break;
 
             case KEY_DOWN:
-                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT ||
+                    event == KEY_EVENT_LONG_PRESS)
                 {
                     next = edit_value - item->step;
                     if (next < item->min)
@@ -599,6 +768,7 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                     if (next != edit_value)
                     {
                         edit_value = next;
+                        menu_dirty = 1U;
                         return 1U;
                     }
                 }
@@ -607,23 +777,37 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
             case KEY_OK:
                 if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_LONG_PRESS)
                 {
+                    int32_t old = *item->value;
+
                     *item->value = edit_value;
                     editing = 0U;
+                    if (!Car_Menu_ApplyParams())
+                    {
+                        *item->value = old;
+                        (void)Car_Menu_ApplyParams();
+                        menu_message_set("STOP/PARAM FAIL");
+                    }
+                    else
+                    {
+                        menu_message_set("APPLIED");
+                    }
+                    menu_dirty = 1U;
                     return 1U;
                 }
                 if (event == KEY_EVENT_DOUBLE_CLICK)
                 {
                     editing = 0U;
+                    menu_dirty = 1U;
                     return 1U;
                 }
                 break;
 
             case KEY_BACK:
-                if (event == KEY_EVENT_SINGLE_CLICK ||
-                    event == KEY_EVENT_DOUBLE_CLICK ||
+                if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_DOUBLE_CLICK ||
                     event == KEY_EVENT_LONG_PRESS)
                 {
                     editing = 0U;
+                    menu_dirty = 1U;
                     return 1U;
                 }
                 break;
@@ -638,17 +822,23 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
     switch (key)
     {
         case KEY_UP:
-            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT ||
+                event == KEY_EVENT_LONG_PRESS)
             {
                 selected = selected->prev;
+                menu_scroll_adjust();
+                menu_dirty = 1U;
                 return 1U;
             }
             break;
 
         case KEY_DOWN:
-            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT || event == KEY_EVENT_LONG_PRESS)
+            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_REPEAT ||
+                event == KEY_EVENT_LONG_PRESS)
             {
                 selected = selected->next;
+                menu_scroll_adjust();
+                menu_dirty = 1U;
                 return 1U;
             }
             break;
@@ -660,11 +850,25 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                 {
                     page = selected;
                     selected = page->child;
+                    scroll_offset = 0;
+                    menu_dirty = 1U;
+                    return 1U;
+                }
+
+                if (selected->info != NULL &&
+                    selected->info->action != CAR_MENU_ACT_NONE)
+                {
+                    menu_message_set("HOLD OK");
                     return 1U;
                 }
 
                 if (selected->info != NULL && selected->info->value != NULL)
                 {
+                    if (!menu_can_edit())
+                    {
+                        menu_message_set("STOP FIRST");
+                        return 1U;
+                    }
                     edit_value = *selected->info->value;
                     if (edit_value < selected->info->min)
                     {
@@ -675,10 +879,28 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                         edit_value = selected->info->max;
                     }
                     editing = 1U;
+                    menu_dirty = 1U;
+                    return 1U;
+                }
+                return 0U;
+            }
+
+            if (event == KEY_EVENT_LONG_PRESS)
+            {
+                if (selected->info != NULL &&
+                    selected->info->action != CAR_MENU_ACT_NONE)
+                {
+                    menu_action_run(selected->info->action);
+                    menu_dirty = 1U;
                     return 1U;
                 }
 
-                return 0U;
+                page = &nodes[MAIN];
+                selected = page->child;
+                scroll_offset = 0;
+                editing = 0U;
+                menu_dirty = 1U;
+                return 1U;
             }
 
             if (event == KEY_EVENT_DOUBLE_CLICK)
@@ -687,28 +909,23 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
                 {
                     selected = page;
                     page = page->parent;
+                    menu_scroll_adjust();
+                    menu_dirty = 1U;
                     return 1U;
                 }
                 return 0U;
             }
-
-            if (event == KEY_EVENT_LONG_PRESS)
-            {
-                page = &nodes[MAIN];
-                selected = page->child;
-                editing = 0U;
-                return 1U;
-            }
             break;
 
         case KEY_BACK:
-            if (event == KEY_EVENT_SINGLE_CLICK ||
-                event == KEY_EVENT_DOUBLE_CLICK)
+            if (event == KEY_EVENT_SINGLE_CLICK || event == KEY_EVENT_DOUBLE_CLICK)
             {
                 if (page->parent != NULL)
                 {
                     selected = page;
                     page = page->parent;
+                    menu_scroll_adjust();
+                    menu_dirty = 1U;
                     return 1U;
                 }
                 return 0U;
@@ -718,7 +935,9 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
             {
                 page = &nodes[MAIN];
                 selected = page->child;
+                scroll_offset = 0;
                 editing = 0U;
+                menu_dirty = 1U;
                 return 1U;
             }
             break;
@@ -731,21 +950,188 @@ uint8_t Car_Menu_Update(Key_Id key, Key_Event event)
 }
 
 /* ========================================================================== */
+/*                              显示                                           */
+/* ========================================================================== */
+
+static void menu_draw_row(unsigned row, const char *text, uint8_t highlight)
+{
+    if (row >= 10U || text == NULL)
+    {
+        return;
+    }
+
+    if (strcmp(shown[row], text) == 0)
+    {
+        return;
+    }
+
+    NEUQ_LCD200_SetBackColor(highlight ? LCD_WHITE : LCD_BLACK);
+    NEUQ_LCD200_SetPenColor(highlight ? LCD_BLACK : LCD_WHITE);
+    NEUQ_LCD200_ClearRect(0, (uint16_t)(row * MENU_ROW_PX),
+                          MENU_SCREEN_W, MENU_ROW_PX);
+    NEUQ_LCD200_DisplayString(0, (uint16_t)(row * MENU_ROW_PX),
+                              (char *)text);
+    menu_copy(shown[row], text, MENU_TEXT_LEN + 1U);
+}
+
+static void menu_invalidate_display(void)
+{
+    memset(shown, 0, sizeof(shown));
+}
+
+static void menu_append(char *out, unsigned n, const char *src)
+{
+    unsigned used = (unsigned)strlen(out);
+
+    if (used + 1U >= n)
+    {
+        return;
+    }
+
+    menu_copy(out + used, src, n - used);
+}
+
+static void menu_build_path(char *out, unsigned n)
+{
+    const MenuNode *stack[10];
+    unsigned depth = 0U;
+    unsigned i;
+    const MenuNode *node = page;
+
+    while (node != NULL && depth < 10U)
+    {
+        stack[depth++] = node;
+        node = node->parent;
+    }
+
+    out[0] = '\0';
+    for (i = depth; i > 0U; i--)
+    {
+        if (out[0] != '\0')
+        {
+            menu_append(out, n, ">");
+        }
+        menu_append(out, n, stack[i - 1U]->info->name);
+    }
+}
+
+static void menu_build_status(char *out, unsigned n, const CarDebugSnapshot *s)
+{
+    uint16_t mv = Car_Adc_GetFilteredMv();
+
+    if (menu_message_active())
+    {
+        menu_copy(out, menu_message, n);
+        return;
+    }
+
+    (void)snprintf(out, n, "%s F%u %s %u.%uV",
+                   menu_state_name(s->state), (unsigned)s->fault,
+                   menu_mode_name(s->mode),
+                   (unsigned)(mv / 1000U), (unsigned)((mv % 1000U) / 100U));
+}
+
+static void menu_build_body(const MenuNode *node, const CarDebugSnapshot *s,
+                            char *out, unsigned n)
+{
+    const MenuConfig *cfg = node->info;
+    char value[MENU_TEXT_LEN + 1U];
+
+    if (cfg == NULL)
+    {
+        out[0] = '\0';
+        return;
+    }
+
+    value[0] = '\0';
+
+    if (cfg->value != NULL)
+    {
+        int32_t v = (editing && node == selected) ? edit_value : *cfg->value;
+        menu_format_value(cfg, v, value, sizeof(value));
+        if (editing && node == selected)
+        {
+            (void)snprintf(out, n, "%s: [%s]", cfg->name, value);
+        }
+        else
+        {
+            (void)snprintf(out, n, "%s: %s", cfg->name, value);
+        }
+    }
+    else if (cfg->action != CAR_MENU_ACT_NONE)
+    {
+        (void)snprintf(out, n, "%s [HOLD OK]", cfg->name);
+    }
+    else if (node->child != NULL)
+    {
+        menu_copy(out, cfg->name, n);
+    }
+    else if (node->id >= ST_STATE && node->id <= ST_BATT)
+    {
+        menu_status_value(node->id, s, value, sizeof(value));
+        (void)snprintf(out, n, "%s: %s", cfg->name, value);
+    }
+    else
+    {
+        menu_info_value(node->id, value, sizeof(value));
+        (void)snprintf(out, n, "%s: %s", cfg->name, value);
+    }
+}
+
+void Car_Menu_Render(void)
+{
+    CarDebugSnapshot snapshot;
+    char text[MENU_TEXT_LEN + 1U];
+    char body[MENU_TEXT_LEN + 1U];
+    unsigned row;
+
+    if (!Car_Debug_GetSnapshot(&snapshot))
+    {
+        return;
+    }
+
+    menu_build_path(text, sizeof(text));
+    menu_draw_row(0U, text, 0U);
+
+    menu_build_status(text, sizeof(text), &snapshot);
+    menu_draw_row(1U, text, 0U);
+
+    for (row = 0U; row < MENU_LIST_ROWS; row++)
+    {
+        int16_t index = (int16_t)(scroll_offset + (int16_t)row);
+        MenuNode *node = menu_child_at(page, index);
+
+        if (node == NULL)
+        {
+            text[0] = '\0';
+            menu_draw_row(MENU_LIST_FIRST_ROW + row, text, 0U);
+            continue;
+        }
+
+        menu_build_body(node, &snapshot, body, sizeof(body));
+        if (node == selected)
+        {
+            (void)snprintf(text, sizeof(text), ">%s", body);
+        }
+        else
+        {
+            (void)snprintf(text, sizeof(text), " %s", body);
+        }
+        menu_draw_row(MENU_LIST_FIRST_ROW + row, text, node == selected);
+    }
+
+    menu_dirty = 0U;
+}
+
+/* ========================================================================== */
 /*                              对外接口                                       */
 /* ========================================================================== */
 
-/*
- * 函数名称：Car_Menu_Init
- * 函数功能：初始化参数、建链、自检并初始化按键。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     Car_Menu_Init();
- * 备注信息：不初始化 LCD；当前显示层已暂时移除。
- */
 void Car_Menu_Init(void)
 {
-    menu_reset_params();
+    static uint8_t initialized;
+
+    menu_params_default();
     (void)Car_Menu_BuildLink();
     (void)Car_Menu_ValidateLinks();
 
@@ -753,21 +1139,52 @@ void Car_Menu_Init(void)
     selected = page->child;
     editing = 0U;
     edit_value = 0;
+    scroll_offset = 0;
+    menu_dirty = 1U;
+    menu_message[0] = '\0';
+    message_until = 0U;
 
     Key_Init();
+
+    if (!initialized)
+    {
+        /* LCD 初始化内部使用 printf；先初始化调试串口，避免 TXE 等待死锁。 */
+        NEUQ_Debug_init();
+        NEUQ_LCD200_init();
+        NEUQ_LCD200_SetDirection(LCD200_DIR_Cross);
+        NEUQ_LCD200_SetBackColor(LCD_BLACK);
+        NEUQ_LCD200_SetPenColor(LCD_WHITE);
+        NEUQ_LCD200_SetAsciiFont(&ASCII_Font24);
+        NEUQ_LCD200_Clear();
+        menu_invalidate_display();
+        initialized = 1U;
+    }
+
+    /* 上电先应用默认值；Flash 有合法数据时覆盖。 */
+    (void)Car_Menu_ApplyParams();
+    flash_present = 0U;
+    {
+        CarParams params;
+
+        if (Car_Params_Load(&params))
+        {
+            menu_params_from_flash(&params);
+            if (!Car_Menu_ApplyParams())
+            {
+                menu_params_default();
+                (void)Car_Menu_ApplyParams();
+            }
+            else
+            {
+                flash_present = 1U;
+            }
+        }
+    }
 }
 
-/*
- * 函数名称：Car_Menu_Poll
- * 函数功能：扫描按键并处理全部待处理事件。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     while (1) { Car_Menu_Poll(); }
- * 备注信息：建议每 5~10 ms 调用一次；显示层暂时为空。
- */
 void Car_Menu_Poll(void)
 {
+    static uint32_t last_status_ms;
     unsigned i;
     Key_Event event;
 
@@ -780,44 +1197,35 @@ void Car_Menu_Poll(void)
             (void)Car_Menu_Update((Key_Id)i, event);
         }
     }
+
+    if ((uint32_t)(HAL_GetTick() - last_status_ms) >= 200U)
+    {
+        last_status_ms = HAL_GetTick();
+        menu_dirty = 1U;
+    }
+
+    if (menu_dirty)
+    {
+        Car_Menu_Render();
+    }
 }
 
-/*
- * 函数名称：Car_Menu_Render
- * 函数功能：显示入口；当前为空实现。
- * 参数说明：无。
- * 返回参数：无。
- * 使用示例：
- *     Car_Menu_Render();
- * 备注信息：LCD200 默认 Cross 横屏为 320x240，原竖屏 17 行布局超出高度，
- *           属于显示 bug，已暂时删除渲染代码；待按横屏重新设计后恢复。
- */
-void Car_Menu_Render(void)
-{
-    /* 暂时不显示，避免越界写屏。 */
-}
-
-/*
- * 函数名称：Car_Menu_Goto
- * 函数功能：跳转到指定节点。
- * 参数说明：id —— 目标节点编号。
- * 返回参数：1 成功；0 编号无效。
- * 使用示例：
- *     Car_Menu_Goto(P10);
- * 备注信息：叶子节点进入其父页面并选中自己；页面节点进入自身。
- */
 uint8_t Car_Menu_Goto(MenuID id)
 {
     MenuNode *node;
 
-    if (id < 0 || id >= MENU_COUNT)
+    if (id <= MENU_NONE || id >= MENU_COUNT)
     {
         return 0U;
     }
 
     node = &nodes[id];
-
-    if (node->parent != NULL)
+    if (node->child != NULL)
+    {
+        page = node;
+        selected = page->child;
+    }
+    else if (node->parent != NULL)
     {
         page = node->parent;
         selected = node;
@@ -825,108 +1233,59 @@ uint8_t Car_Menu_Goto(MenuID id)
     else
     {
         page = node;
-        selected = node->child;
+        selected = page->child;
     }
 
     editing = 0U;
+    scroll_offset = 0;
+    menu_scroll_adjust();
+    menu_dirty = 1U;
     return 1U;
 }
 
-/*
- * 函数名称：Car_Menu_GetPageId
- * 函数功能：返回当前页面编号。
- * 参数说明：无。
- * 返回参数：页面编号；未初始化返回 MENU_NONE。
- * 使用示例：
- *     MenuID page_id = Car_Menu_GetPageId();
- * 备注信息：通过指针差计算，nodes[] 是固定数组。
- */
 MenuID Car_Menu_GetPageId(void)
 {
-    return (page != NULL) ? (MenuID)(page - nodes) : MENU_NONE;
+    return (page != NULL) ? page->id : MENU_NONE;
 }
 
-/*
- * 函数名称：Car_Menu_GetSelectedId
- * 函数功能：返回当前选中项编号。
- * 参数说明：无。
- * 返回参数：选中项编号；未初始化返回 MENU_NONE。
- * 使用示例：
- *     MenuID selected_id = Car_Menu_GetSelectedId();
- * 备注信息：selected 永远是 page 的子节点。
- */
 MenuID Car_Menu_GetSelectedId(void)
 {
-    return (selected != NULL) ? (MenuID)(selected - nodes) : MENU_NONE;
+    return (selected != NULL) ? selected->id : MENU_NONE;
 }
 
-/*
- * 函数名称：Car_Menu_IsEditing
- * 函数功能：返回当前是否处于编辑模式。
- * 参数说明：无。
- * 返回参数：1 编辑；0 浏览。
- * 使用示例：
- *     if (Car_Menu_IsEditing()) { }
- * 备注信息：无。
- */
 uint8_t Car_Menu_IsEditing(void)
 {
     return editing;
 }
 
-/*
- * 函数名称：Car_Menu_GetEditValue
- * 函数功能：返回编辑中的临时值。
- * 参数说明：无。
- * 返回参数：编辑值；非编辑模式返回 0。
- * 使用示例：
- *     int32_t value = Car_Menu_GetEditValue();
- * 备注信息：无。
- */
 int32_t Car_Menu_GetEditValue(void)
 {
-    return (editing != 0U) ? edit_value : 0;
+    return editing ? edit_value : 0;
 }
 
-/*
- * 函数名称：Car_Menu_SetEditValue
- * 函数功能：直接设置编辑值，并按当前选中项的范围限幅。
- * 参数说明：value —— 新值。
- * 返回参数：无。
- * 使用示例：
- *     Car_Menu_SetEditValue(200);
- * 备注信息：用于测试或外部恢复；提交仍由 Car_Menu_Update() 完成。
- */
 void Car_Menu_SetEditValue(int32_t value)
 {
-    edit_value = value;
+    const MenuConfig *cfg = (selected != NULL) ? selected->info : NULL;
 
-    if (editing != 0U && selected != NULL && selected->info != NULL &&
-        selected->info->value != NULL)
+    if (cfg != NULL && cfg->value != NULL)
     {
-        if (edit_value < selected->info->min)
+        if (value < cfg->min)
         {
-            edit_value = selected->info->min;
+            value = cfg->min;
         }
-        if (edit_value > selected->info->max)
+        if (value > cfg->max)
         {
-            edit_value = selected->info->max;
+            value = cfg->max;
         }
     }
+
+    edit_value = value;
+    menu_dirty = 1U;
 }
 
-/*
- * 函数名称：Car_Menu_GetConfig
- * 函数功能：按编号取节点的静态配置。
- * 参数说明：id —— 节点编号。
- * 返回参数：配置指针；编号无效返回 NULL。
- * 使用示例：
- *     const MenuConfig *cfg = Car_Menu_GetConfig(P10);
- * 备注信息：返回只读常量表指针，调用者不得写入。
- */
 const MenuConfig *Car_Menu_GetConfig(MenuID id)
 {
-    if (id < 0 || id >= MENU_COUNT)
+    if (id <= MENU_NONE || id >= MENU_COUNT)
     {
         return NULL;
     }
@@ -934,16 +1293,12 @@ const MenuConfig *Car_Menu_GetConfig(MenuID id)
     return &MenuTable[id];
 }
 
-/*
- * 函数名称：Car_Menu_NodeCount
- * 函数功能：返回节点总数（不含 MENU_NONE）。
- * 参数说明：无。
- * 返回参数：MENU_COUNT。
- * 使用示例：
- *     for (i = 0; i < Car_Menu_NodeCount(); i++) { }
- * 备注信息：当前为 58 个：MAIN + 4 个目录 + 53 个竞赛节点。
- */
 int16_t Car_Menu_NodeCount(void)
 {
     return (int16_t)MENU_COUNT;
+}
+
+int16_t Car_Menu_GetScrollOffset(void)
+{
+    return scroll_offset;
 }

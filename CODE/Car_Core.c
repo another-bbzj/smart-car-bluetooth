@@ -220,11 +220,18 @@ void Car_Init(Car_Core *c)
 
     memset(c, 0, sizeof(*c));                      /* 清空全部状态与历史 */
 
+    /* 运行时参数初始值来自 Car_Config.h，停车时可由菜单/协议修改。 */
+    c->rpm_limit = CAR_RPM_LIMIT;
+    c->pwm_limit = CAR_PWM_LIMIT;
+    c->accel_limit = CAR_ACCEL_LIMIT_RPM_S;
+    c->jerk_limit = CAR_JERK_LIMIT_RPM_S2;
+    c->cpr = CAR_ENCODER_CPR;
+
     /* 规划器限制来源：Car_Config.h 的指令限速、加速度和加加速度上限。 */
     CarReference_Init(&c->profile,
-                      CAR_RPM_LIMIT,
-                      CAR_ACCEL_LIMIT_RPM_S,
-                      CAR_JERK_LIMIT_RPM_S2);
+                      c->rpm_limit,
+                      c->accel_limit,
+                      c->jerk_limit);
 
     for (i = 0; i < 2; i++)
     {
@@ -233,7 +240,7 @@ void Car_Init(Car_Core *c)
                      CAR_DEFAULT_KP,
                      CAR_DEFAULT_KI,
                      CAR_DEFAULT_KD,
-                     CAR_PWM_LIMIT);
+                     c->pwm_limit);
 
         if (!Car_Pid_configure(&c->pid[i],
                                CAR_PID_SETPOINT_WEIGHT,
@@ -246,6 +253,137 @@ void Car_Init(Car_Core *c)
             Car_Fault(c, CAR_CONTROLLER_FAULT);    /* 配置失败立即进入故障 */
         }
     }
+}
+
+/*
+ * 函数名称：Car_Core_SetPid
+ * 函数功能：停车时替换单轮速度 PID 增益。
+ * 参数说明：c —— 控制对象；wheel —— 0 左 / 1 右；kp/ki/kd —— 新增益。
+ * 返回参数：1 成功；0 状态、轮号或参数非法。
+ * 备注信息：使用临时对象校验后整体替换，失败不修改原控制器。
+ */
+uint8_t Car_Core_SetPid(Car_Core *c, uint8_t wheel,
+                        float kp, float ki, float kd)
+{
+    Car_Pid_Struct next;
+
+    if (c == NULL || wheel > 1U || c->state != CAR_STOP)
+    {
+        return 0U;
+    }
+
+    if (!Car_Pid_init(&next, kp, ki, kd, c->pwm_limit) ||
+        !Car_Pid_configure(&next,
+                           CAR_PID_SETPOINT_WEIGHT,
+                           CAR_PID_D_TAU_S,
+                           1.0f,
+                           CAR_FF_KS,
+                           CAR_FF_KV,
+                           CAR_FF_KA))
+    {
+        return 0U;
+    }
+
+    c->pid[wheel] = next;
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_SetLimits
+ * 函数功能：停车时修改限速、PWM 限幅、参考加速度和加加速度。
+ * 参数说明：四个正数，单位分别为 rpm、PWM、rpm/s、rpm/s²。
+ * 返回参数：1 成功；0 非停车状态或参数越界，原配置不变。
+ * 备注信息：保留现有 PID 增益，重建规划器和控制器并清空运动历史。
+ */
+uint8_t Car_Core_SetLimits(Car_Core *c, float rpm_limit, float pwm_limit,
+                           float accel_limit, float jerk_limit)
+{
+    Car_Pid_Struct next[2];
+    unsigned i;
+
+    if (c == NULL || c->state != CAR_STOP)
+    {
+        return 0U;
+    }
+
+    /* 上限按当前硬件的安全范围限制，禁止菜单写入 0 或超量程。 */
+    if (!(rpm_limit >= 10.0f && rpm_limit <= 300.0f &&
+          pwm_limit >= 100.0f && pwm_limit <= 10000.0f &&
+          accel_limit >= 10.0f && accel_limit <= 5000.0f &&
+          jerk_limit >= 10.0f && jerk_limit <= 20000.0f))
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < 2U; i++)
+    {
+        if (!Car_Pid_init(&next[i],
+                          c->pid[i].kp, c->pid[i].ki, c->pid[i].kd,
+                          pwm_limit) ||
+            !Car_Pid_configure(&next[i],
+                               CAR_PID_SETPOINT_WEIGHT,
+                               CAR_PID_D_TAU_S,
+                               1.0f,
+                               CAR_FF_KS,
+                               CAR_FF_KV,
+                               CAR_FF_KA))
+        {
+            return 0U;
+        }
+    }
+
+    c->rpm_limit = rpm_limit;
+    c->pwm_limit = pwm_limit;
+    c->accel_limit = accel_limit;
+    c->jerk_limit = jerk_limit;
+
+    CarReference_Init(&c->profile, rpm_limit, accel_limit, jerk_limit);
+    reset_motion(c);
+
+    for (i = 0U; i < 2U; i++)
+    {
+        c->pid[i] = next[i];
+    }
+
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_SetCpr
+ * 函数功能：停车时修改编码器每输出轴一圈计数。
+ * 参数说明：cpr —— 新 CPR，范围 10~100000。
+ * 返回参数：1 成功；0 非停车状态或参数非法。
+ */
+uint8_t Car_Core_SetCpr(Car_Core *c, float cpr)
+{
+    if (c == NULL || c->state != CAR_STOP ||
+        !(cpr >= 10.0f && cpr <= 100000.0f))
+    {
+        return 0U;
+    }
+
+    c->cpr = cpr;
+    return 1U;
+}
+
+/*
+ * 函数名称：Car_Core_Stop
+ * 函数功能：执行与蓝牙 CMD2 等价的停车/清故障。
+ * 参数说明：c —— 控制对象。
+ * 备注信息：只清软件故障，不清除硬件故障源；不保证车轮已物理停止。
+ */
+void Car_Core_Stop(Car_Core *c)
+{
+    if (c == NULL)
+    {
+        return;
+    }
+
+    reset_motion(c);
+    c->state = CAR_STOP;
+    c->mode = CAR_MODE_MANUAL;
+    c->fault = 0;
+    c->link_us = 0;
 }
 
 /*
@@ -398,8 +536,8 @@ static void execute(Car_Core *c)
                 break;
             }
 
-            c->target[0] = clamp(signed_rpm(c->data), CAR_RPM_LIMIT);
-            c->target[1] = clamp(signed_rpm(c->data + 2), CAR_RPM_LIMIT);
+            c->target[0] = clamp(signed_rpm(c->data), c->rpm_limit);
+            c->target[1] = clamp(signed_rpm(c->data + 2), c->rpm_limit);
 
             if (c->target[0] == 0.0f && c->target[1] == 0.0f)
             {
@@ -430,7 +568,7 @@ static void execute(Car_Core *c)
                               u16(c->data + 1) / 100.0f,
                               u16(c->data + 3) / 100.0f,
                               u16(c->data + 5) / 100.0f,
-                              CAR_PWM_LIMIT) ||
+                              c->pwm_limit) ||
                 !Car_Pid_configure(&next,
                                    CAR_PID_SETPOINT_WEIGHT,
                                    CAR_PID_D_TAU_S,
@@ -683,7 +821,7 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
          * 计数增量 / 每圈计数 / 周期秒数 = 转/秒，
          * 再乘以 60 换算为每分钟转数（rpm）。
          */
-        float raw = (float)counts[i] * (60.0f / (CAR_ENCODER_CPR * dt));
+        float raw = (float)counts[i] * (60.0f / (c->cpr * dt));
         float abs_speed;                          /* 实测转速绝对值，rpm */
 
         /*
@@ -762,7 +900,7 @@ void Car_TickDt(Car_Core *c, int32_t left_count, int32_t right_count,
          */
         if (c->reference[i] * c->speed[i] < 0.0f &&
             c->output[i] * c->speed[i] < 0.0f &&
-            absolute(c->output[i]) > 0.9f * CAR_PWM_LIMIT &&
+            absolute(c->output[i]) > 0.9f * c->pwm_limit &&
             abs_speed > 100.0f &&
             abs_speed >= c->slow_speed[i] - 5.0f)
         {

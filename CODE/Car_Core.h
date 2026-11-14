@@ -74,6 +74,13 @@ typedef struct
     float speed[2];          /* 滤波后的实测转速，单位 rpm，下标 0 左、1 右 */
     float output[2];         /* 带符号 PWM 输出，正负号表示方向，下标 0 左、1 右 */
 
+    /* ---------- 运行时可调参数（仅停车时修改） ---------- */
+    float rpm_limit;         /* 目标转速限幅，rpm */
+    float pwm_limit;         /* PWM/积分限幅，PWM 数值 */
+    float accel_limit;       /* 参考加速度限幅，rpm/s */
+    float jerk_limit;        /* 参考加加速度限幅，rpm/s² */
+    float cpr;               /* 编码器每输出轴一圈计数 */
+
     /* ---------- 计时与保护，单位均为微秒 ---------- */
     uint32_t link_us;        /* 运行通信看门狗计时 */
     uint32_t stall_us[2];    /* 左右轮堵转计时 */
@@ -125,6 +132,38 @@ void Car_Init(Car_Core *c);
  * 重读相同 session/sequence 不刷新年龄；自主故障须先 STOP 再重新使能。 */
 void Car_SetVisionObservation(Car_Core *c, const CarVisionObservation *observation,
                               uint32_t now_ms);
+
+/**
+ * @brief 停车时替换单轮速度 PID 增益。
+ * @param c     控制对象。
+ * @param wheel 0 左轮、1 右轮。
+ * @param kp/ki/kd 新增益，沿用 5 ms 离散约定。
+ * @return 1 成功；0 非停车状态、轮号非法或参数非法，原控制器不变。
+ * @note 输出限幅使用 c->pwm_limit；写入后清空积分与微分历史。
+ */
+uint8_t Car_Core_SetPid(Car_Core *c, uint8_t wheel,
+                        float kp, float ki, float kd);
+
+/**
+ * @brief 停车时修改限速、PWM 限幅、参考加速度与加加速度。
+ * @return 1 成功；0 非停车状态或参数越界，原配置不变。
+ * @note 会重建参考规划器和双轮 PID，保留当前增益，清空运动历史。
+ */
+uint8_t Car_Core_SetLimits(Car_Core *c, float rpm_limit, float pwm_limit,
+                           float accel_limit, float jerk_limit);
+
+/**
+ * @brief 停车时修改编码器 CPR。
+ * @param cpr 每输出轴一圈计数，范围 10~100000。
+ * @return 1 成功；0 非停车状态或参数非法。
+ */
+uint8_t Car_Core_SetCpr(Car_Core *c, float cpr);
+
+/**
+ * @brief 执行与蓝牙 CMD2 等价的 STOP：清目标、清故障、回到停车。
+ * @note 供板载菜单使用；不会清除硬件故障源。
+ */
+void Car_Core_Stop(Car_Core *c);
 
 /**
  * @brief 对一个字节更新 CRC-8，返回新的累计值。
